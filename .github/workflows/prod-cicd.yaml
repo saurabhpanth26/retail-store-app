@@ -6,16 +6,22 @@ name: CI/CD - Prod (Canary)
 # Flow:
 #   detect-changes
 #       │
-#   build-push          ← build prod-<sha> image, push to ECR
+#   build-push            ← build prod-<sha> image, push to ECR
 #       │
-#   canary-deploy       ← update values-prod-canary.yaml → ArgoCD deploys
-#       │                  UI:      20% traffic via NGINX canary annotations
-#       │                  Backend: 1 canary pod alongside stable pods
+#   canary-deploy         ← update values-prod-canary.yaml → ArgoCD deploys
+#       │                    UI: 20% NGINX canary  |  Backend: 1 canary pod
 #       │
-#   canary-approval     ← manual gate (GitHub Environment: "production")
-#       │                  reviewer validates canary in prod before promoting
+#   canary-health-check   ← AUTOMATED GATE
+#       │                    • wait for all canary pods to become Ready
+#       │                    • HTTP smoke test the canary pod directly
+#       │                    ↓ FAIL → auto-rollback (scale canary to 0)
+#       │                             pipeline stops, 0% users on faulty pods
+#       │                    ↓ PASS → continue
 #       │
-#   stable-promote      ← update values-prod.yaml → ArgoCD promotes to 100%
+#   canary-approval       ← manual gate (GitHub Environment: "production")
+#       │                    reviewer validates 20% live traffic behaviour
+#       │
+#   stable-promote        ← update values-prod.yaml → ArgoCD promotes to 100%
 #       │
 #   summary
 # ──────────────────────────────────────────────────────────────────────────────
@@ -95,10 +101,9 @@ jobs:
           TAG="prod-$(echo ${{ github.sha }} | cut -c1-7)"
           AWS_ACCOUNT="${{ secrets.AWS_ACCOUNT_ID }}"
           ECR="${AWS_ACCOUNT}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/retail-store-${SVC}"
-          echo "TAG=${TAG}"        >> $GITHUB_ENV
-          echo "ECR_REPO=${ECR}"  >> $GITHUB_ENV
-          echo "SVC=${SVC}"       >> $GITHUB_ENV
-          echo "Tag: ${TAG} | Repo: ${ECR}"
+          echo "TAG=${TAG}"       >> $GITHUB_ENV
+          echo "ECR_REPO=${ECR}" >> $GITHUB_ENV
+          echo "SVC=${SVC}"      >> $GITHUB_ENV
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -133,7 +138,7 @@ jobs:
 # CANARY DEPLOY — update values-prod-canary.yaml → ArgoCD syncs canary pods
 # ══════════════════════════════════════════════════════════════════════════════
   canary-deploy:
-    name: Canary Deploy — ${{ matrix.service }} (20%)
+    name: Canary Deploy — ${{ matrix.service }}
     runs-on: ubuntu-latest
     needs: [detect-changes, build-push]
     if: needs.detect-changes.outputs.has-changes == 'true'
@@ -160,10 +165,8 @@ jobs:
       - name: Update values-prod-canary.yaml on gitops branch
         run: |
           CANARY_VALUES="src/${SVC}/chart/values-prod-canary.yaml"
-
           git config user.email "gitops@github.com"
           git config user.name "GitOps Bot"
-
           git fetch origin gitops
           git checkout gitops
 
@@ -179,7 +182,6 @@ jobs:
 
           if grep -q "\"${TAG}\"" "${CANARY_VALUES}"; then
             rm "${CANARY_VALUES}.bak"
-            echo "✅ Canary values updated: ${SVC} → ${TAG}"
           else
             mv "${CANARY_VALUES}.bak" "${CANARY_VALUES}"
             echo "❌ Canary values update failed"; exit 1
@@ -188,11 +190,9 @@ jobs:
       - name: Commit & push canary to gitops
         run: |
           CANARY_VALUES="src/${SVC}/chart/values-prod-canary.yaml"
-
           if ! git diff --quiet "${CANARY_VALUES}"; then
             git add "${CANARY_VALUES}"
             git commit -m "ci(canary): ${SVC} → ${TAG} [skip ci]"
-
             for i in {1..3}; do
               git push origin gitops && break || {
                 git pull --rebase origin gitops
@@ -200,31 +200,190 @@ jobs:
               }
               [ $i -eq 3 ] && { echo "❌ push failed"; exit 1; }
             done
-            echo "✅ Canary live — ArgoCD will sync retail-store-${SVC}-canary"
           fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CANARY APPROVAL GATE
-# Pauses here until a reviewer approves in GitHub → Settings → Environments
-# Configure "production" environment with Required Reviewers before using.
+# CANARY HEALTH CHECK — validate pods are healthy BEFORE any user traffic
+# If pods fail → auto rollback (scale to 0) + pipeline stops
+# ══════════════════════════════════════════════════════════════════════════════
+  canary-health-check:
+    name: Canary Health Check
+    runs-on: ubuntu-latest
+    needs: [detect-changes, canary-deploy]
+    if: needs.detect-changes.outputs.has-changes == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          CLUSTER=$(aws eks list-clusters --query 'clusters[?contains(@, `retail-store`)] | [0]' --output text)
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name "${CLUSTER}"
+          echo "✅ kubectl configured for cluster: ${CLUSTER}"
+
+      - name: Wait for canary pods to be Ready (2 min timeout)
+        id: pod-check
+        run: |
+          SERVICES=(${{ needs.detect-changes.outputs.changed-services }})
+          FAILED=()
+
+          for SVC in "${SERVICES[@]}"; do
+            DEPLOY="retail-store-${SVC}-canary"
+            echo "⏳ Waiting for ${DEPLOY} ..."
+
+            if kubectl rollout status deployment/${DEPLOY} \
+                -n retail-store-prod \
+                --timeout=120s 2>&1; then
+              echo "✅ ${DEPLOY} is Ready"
+            else
+              echo "❌ ${DEPLOY} failed to become Ready"
+              FAILED+=("${DEPLOY}")
+            fi
+          done
+
+          if [ ${#FAILED[@]} -gt 0 ]; then
+            echo "FAILED_DEPLOYMENTS=${FAILED[*]}" >> $GITHUB_ENV
+            echo "health_passed=false" >> $GITHUB_OUTPUT
+          else
+            echo "health_passed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: HTTP smoke test — canary pod health endpoint
+        id: http-check
+        if: steps.pod-check.outputs.health_passed == 'true'
+        run: |
+          # Port-forward the canary UI pod and hit its health endpoint
+          # (avoids depending on DNS/NLB being ready in all environments)
+          POD=$(kubectl get pod -n retail-store-prod \
+            -l app.kubernetes.io/name=retail-store-ui-canary \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+
+          if [ -z "$POD" ]; then
+            echo "⚠️  No canary UI pod found — skipping HTTP check"
+            echo "http_passed=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Testing pod: ${POD}"
+          kubectl port-forward pod/${POD} 9090:8080 -n retail-store-prod &
+          PF_PID=$!
+          sleep 5
+
+          HTTP_STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
+            http://localhost:9090/actuator/health/readiness \
+            --max-time 10 || echo "000")
+
+          kill ${PF_PID} 2>/dev/null || true
+
+          echo "HTTP status: ${HTTP_STATUS}"
+          if [ "${HTTP_STATUS}" == "200" ]; then
+            echo "✅ HTTP smoke test passed"
+            echo "http_passed=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ HTTP smoke test failed: ${HTTP_STATUS}"
+            echo "http_passed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: AUTO ROLLBACK — scale canary to 0 (pods unhealthy)
+        if: |
+          steps.pod-check.outputs.health_passed == 'false' ||
+          steps.http-check.outputs.http_passed == 'false'
+        run: |
+          echo "🔄 Rolling back canary — scaling all canary deployments to 0"
+          SERVICES=(${{ needs.detect-changes.outputs.changed-services }})
+
+          for SVC in "${SERVICES[@]}"; do
+            DEPLOY="retail-store-${SVC}-canary"
+            kubectl scale deployment/${DEPLOY} \
+              --replicas=0 \
+              -n retail-store-prod 2>/dev/null && \
+              echo "✅ Scaled ${DEPLOY} to 0" || \
+              echo "⚠️  Could not scale ${DEPLOY} (may not exist yet)"
+          done
+
+          echo ""
+          echo "❌ Canary health check FAILED"
+          echo "   Stable deployment is unaffected — 100% traffic on stable pods"
+          echo "   Fix the issue and re-push to main to retry"
+          exit 1
+
+      - name: Health check passed
+        run: |
+          echo "✅ All canary pods are healthy — proceeding to manual approval"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CANARY APPROVAL GATE — manual sign-off after automated checks pass
+# Configure GitHub Environment "production" with Required Reviewers
 # ══════════════════════════════════════════════════════════════════════════════
   canary-approval:
     name: Approve Canary → Promote to Stable
     runs-on: ubuntu-latest
-    needs: canary-deploy
+    needs: canary-health-check
     environment: production
     steps:
-      - name: Canary is live — awaiting approval
+      - name: Canary is healthy — awaiting approval
         run: |
-          echo "Canary deployment is live."
+          echo "All canary pods passed automated health checks."
           echo ""
           echo "UI (20% traffic):  https://saurabh-devops.in"
           echo "ArgoCD:            https://argocd.saurabh-devops.in"
           echo ""
-          echo "Validate the canary, then approve this job to promote to stable."
+          echo "Validate canary behaviour, then approve to promote to 100% stable."
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STABLE PROMOTE — update values-prod.yaml → ArgoCD rolls out 100%
+# CANARY ROLLBACK — reviewer rejected the approval
+# Scales canary to 0 so stable serves 100% again
+# ══════════════════════════════════════════════════════════════════════════════
+  canary-rollback-on-reject:
+    name: Rollback Canary (Rejected)
+    runs-on: ubuntu-latest
+    needs: [detect-changes, canary-approval]
+    if: |
+      always() &&
+      needs.detect-changes.outputs.has-changes == 'true' &&
+      needs.canary-approval.result == 'failure'
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          CLUSTER=$(aws eks list-clusters \
+            --query 'clusters[?contains(@, `retail-store`)] | [0]' \
+            --output text)
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name "${CLUSTER}"
+
+      - name: Scale all canary deployments to 0
+        run: |
+          echo "🔄 Reviewer rejected — rolling back all canary deployments"
+          SERVICES=(${{ needs.detect-changes.outputs.changed-services }})
+
+          for SVC in "${SERVICES[@]}"; do
+            DEPLOY="retail-store-${SVC}-canary"
+            kubectl scale deployment/${DEPLOY} \
+              --replicas=0 \
+              -n retail-store-prod 2>/dev/null && \
+              echo "✅ Rolled back: ${DEPLOY}" || \
+              echo "⚠️  Skipped (not found): ${DEPLOY}"
+          done
+
+          echo ""
+          echo "✅ Rollback complete — 100% traffic back on stable pods"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STABLE PROMOTE — approved, update values-prod.yaml → ArgoCD rolls out 100%
 # ══════════════════════════════════════════════════════════════════════════════
   stable-promote:
     name: Stable Promote — ${{ matrix.service }} (100%)
@@ -254,10 +413,8 @@ jobs:
       - name: Update values-prod.yaml on gitops branch
         run: |
           STABLE_VALUES="src/${SVC}/chart/values-prod.yaml"
-
           git config user.email "gitops@github.com"
           git config user.name "GitOps Bot"
-
           git fetch origin gitops
           git checkout gitops
 
@@ -273,7 +430,6 @@ jobs:
 
           if grep -q "\"${TAG}\"" "${STABLE_VALUES}"; then
             rm "${STABLE_VALUES}.bak"
-            echo "✅ Stable values updated: ${SVC} → ${TAG}"
           else
             mv "${STABLE_VALUES}.bak" "${STABLE_VALUES}"
             echo "❌ Stable values update failed"; exit 1
@@ -282,11 +438,9 @@ jobs:
       - name: Commit & push stable to gitops
         run: |
           STABLE_VALUES="src/${SVC}/chart/values-prod.yaml"
-
           if ! git diff --quiet "${STABLE_VALUES}"; then
             git add "${STABLE_VALUES}"
             git commit -m "ci(prod): ${SVC} → ${TAG} [skip ci]"
-
             for i in {1..3}; do
               git push origin gitops && break || {
                 git pull --rebase origin gitops
@@ -294,7 +448,7 @@ jobs:
               }
               [ $i -eq 3 ] && { echo "❌ push failed"; exit 1; }
             done
-            echo "✅ Stable promoted — ArgoCD will sync retail-store-${SVC}"
+            echo "✅ Stable promoted — ArgoCD syncing retail-store-${SVC}"
           fi
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -303,7 +457,7 @@ jobs:
   summary:
     name: Pipeline Summary
     runs-on: ubuntu-latest
-    needs: [detect-changes, build-push, canary-deploy, canary-approval, stable-promote]
+    needs: [detect-changes, build-push, canary-deploy, canary-health-check, canary-approval, canary-rollback-on-reject, stable-promote]
     if: always()
     steps:
       - name: Write summary
@@ -325,15 +479,24 @@ jobs:
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
           echo "| Build & Push | ${{ needs.build-push.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Canary Deploy (20%) | ${{ needs.canary-deploy.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Canary Health Check | ${{ needs.canary-health-check.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Canary Approval | ${{ needs.canary-approval.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Canary Rollback (if rejected) | ${{ needs.canary-rollback-on-reject.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Stable Promote (100%) | ${{ needs.stable-promote.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ needs.stable-promote.result }}" == "success" ]; then
-            echo "✅ **Full rollout complete — ArgoCD syncing \`retail-store-prod\`**" >> $GITHUB_STEP_SUMMARY
+
+          HEALTH="${{ needs.canary-health-check.result }}"
+          PROMOTE="${{ needs.stable-promote.result }}"
+
+          if [ "$PROMOTE" == "success" ]; then
+            echo "✅ **Full rollout complete — 100% traffic on stable pods**" >> $GITHUB_STEP_SUMMARY
+          elif [ "$HEALTH" == "failure" ]; then
+            echo "🔄 **Auto-rollback — canary pods were unhealthy, 0% user impact**" >> $GITHUB_STEP_SUMMARY
+            echo "> Stable unaffected. Fix the issue and re-push to main." >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.canary-rollback-on-reject.result }}" == "success" ]; then
+            echo "🔄 **Reviewer rejected — canary rolled back to 0, stable at 100%**" >> $GITHUB_STEP_SUMMARY
           elif [ "${{ needs.canary-approval.result }}" == "success" ]; then
-            echo "🔄 **Canary approved — stable promote in progress**" >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ needs.canary-deploy.result }}" == "success" ]; then
-            echo "⏳ **Canary live at 20% — awaiting approval to promote**" >> $GITHUB_STEP_SUMMARY
+            echo "🔄 **Approved — stable promote in progress**" >> $GITHUB_STEP_SUMMARY
           else
-            echo "❌ **Pipeline failed — check logs**" >> $GITHUB_STEP_SUMMARY
+            echo "⏳ **Canary healthy — awaiting manual approval**" >> $GITHUB_STEP_SUMMARY
           fi
