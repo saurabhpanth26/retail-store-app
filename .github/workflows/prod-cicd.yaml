@@ -1,9 +1,23 @@
-name: CI/CD - Prod
+name: CI/CD - Prod (Canary)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Production Promotion Pipeline
-# All security scanning happens in dev-cicd.yaml (shift-left).
-# This pipeline: detect changes → build → push to ECR → update gitops
+# Production Canary Deployment Pipeline
+#
+# Flow:
+#   detect-changes
+#       │
+#   build-push          ← build prod-<sha> image, push to ECR
+#       │
+#   canary-deploy       ← update values-prod-canary.yaml → ArgoCD deploys
+#       │                  UI:      20% traffic via NGINX canary annotations
+#       │                  Backend: 1 canary pod alongside stable pods
+#       │
+#   canary-approval     ← manual gate (GitHub Environment: "production")
+#       │                  reviewer validates canary in prod before promoting
+#       │
+#   stable-promote      ← update values-prod.yaml → ArgoCD promotes to 100%
+#       │
+#   summary
 # ──────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -62,22 +76,18 @@ jobs:
           echo "📦 Services: ${CHANGED[*]}"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# BUILD → ECR PUSH → GITOPS UPDATE
+# BUILD & PUSH IMAGE TO ECR
 # ══════════════════════════════════════════════════════════════════════════════
-  docker-build-push:
-    name: Build & Push ${{ matrix.service }} → prod
+  build-push:
+    name: Build & Push — ${{ matrix.service }}
     runs-on: ubuntu-latest
     needs: detect-changes
     if: needs.detect-changes.outputs.has-changes == 'true'
-    permissions:
-      contents: write
     strategy:
       matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set image variables
         run: |
@@ -110,7 +120,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Build & push to ECR
+      - name: Build & push
         uses: docker/build-push-action@v6
         with:
           context: src/${{ matrix.service }}
@@ -119,9 +129,37 @@ jobs:
             ${{ env.ECR_REPO }}:${{ env.TAG }}
             ${{ env.ECR_REPO }}:prod-latest
 
-      - name: Update Helm values (values-prod.yaml)
+# ══════════════════════════════════════════════════════════════════════════════
+# CANARY DEPLOY — update values-prod-canary.yaml → ArgoCD syncs canary pods
+# ══════════════════════════════════════════════════════════════════════════════
+  canary-deploy:
+    name: Canary Deploy — ${{ matrix.service }} (20%)
+    runs-on: ubuntu-latest
+    needs: [detect-changes, build-push]
+    if: needs.detect-changes.outputs.has-changes == 'true'
+    permissions:
+      contents: write
+    strategy:
+      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set variables
         run: |
-          VALUES_PATH="src/${SVC}/chart/values-prod.yaml"
+          SVC="${{ matrix.service }}"
+          TAG="prod-$(echo ${{ github.sha }} | cut -c1-7)"
+          AWS_ACCOUNT="${{ secrets.AWS_ACCOUNT_ID }}"
+          ECR="${AWS_ACCOUNT}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/retail-store-${SVC}"
+          echo "TAG=${TAG}"       >> $GITHUB_ENV
+          echo "ECR_REPO=${ECR}" >> $GITHUB_ENV
+          echo "SVC=${SVC}"      >> $GITHUB_ENV
+
+      - name: Update values-prod-canary.yaml on gitops branch
+        run: |
+          CANARY_VALUES="src/${SVC}/chart/values-prod-canary.yaml"
 
           git config user.email "gitops@github.com"
           git config user.name "GitOps Bot"
@@ -129,44 +167,134 @@ jobs:
           git fetch origin gitops
           git checkout gitops
 
-          if [[ ! -f "${VALUES_PATH}" ]]; then
-            printf "image:\n  repository: %s\n  tag: \"%s\"\n" "${ECR_REPO}" "${TAG}" > "${VALUES_PATH}"
-          else
-            cp "${VALUES_PATH}" "${VALUES_PATH}.bak"
-            awk -v repo="${ECR_REPO}" -v tag="${TAG}" '
-              BEGIN { in_img=0; done_repo=0; done_tag=0 }
-              /^image:/                                              { in_img=1; print; next }
-              in_img && /^[[:space:]]*repository:/ && !done_repo    { print "  repository: " repo; done_repo=1; next }
-              in_img && /^[[:space:]]*tag:/        && !done_tag     { print "  tag: \"" tag "\""; done_tag=1; next }
-              /^[a-zA-Z]/ && !/^image:/                             { in_img=0 }
-              { print }
-            ' "${VALUES_PATH}.bak" > "${VALUES_PATH}"
+          cp "${CANARY_VALUES}" "${CANARY_VALUES}.bak"
+          awk -v repo="${ECR_REPO}" -v tag="${TAG}" '
+            BEGIN { in_img=0; done_repo=0; done_tag=0 }
+            /^image:/                                           { in_img=1; print; next }
+            in_img && /^[[:space:]]*repository:/ && !done_repo { print "  repository: " repo; done_repo=1; next }
+            in_img && /^[[:space:]]*tag:/        && !done_tag  { print "  tag: \"" tag "\""; done_tag=1; next }
+            /^[a-zA-Z]/ && !/^image:/                          { in_img=0 }
+            { print }
+          ' "${CANARY_VALUES}.bak" > "${CANARY_VALUES}"
 
-            if grep -q "\"${TAG}\"" "${VALUES_PATH}"; then
-              rm "${VALUES_PATH}.bak"
-            else
-              mv "${VALUES_PATH}.bak" "${VALUES_PATH}"
-              echo "❌ values update failed"; exit 1
-            fi
+          if grep -q "\"${TAG}\"" "${CANARY_VALUES}"; then
+            rm "${CANARY_VALUES}.bak"
+            echo "✅ Canary values updated: ${SVC} → ${TAG}"
+          else
+            mv "${CANARY_VALUES}.bak" "${CANARY_VALUES}"
+            echo "❌ Canary values update failed"; exit 1
           fi
 
-      - name: Commit & push to gitops
+      - name: Commit & push canary to gitops
         run: |
-          VALUES_PATH="src/${SVC}/chart/values-prod.yaml"
+          CANARY_VALUES="src/${SVC}/chart/values-prod-canary.yaml"
 
-          if ! git diff --quiet "${VALUES_PATH}"; then
-            git add "${VALUES_PATH}"
-            git commit -m "ci(prod): ${SVC} → ${TAG} [skip ci]"
+          if ! git diff --quiet "${CANARY_VALUES}"; then
+            git add "${CANARY_VALUES}"
+            git commit -m "ci(canary): ${SVC} → ${TAG} [skip ci]"
 
             for i in {1..3}; do
               git push origin gitops && break || {
-                echo "Push conflict — retry $i/3"
                 git pull --rebase origin gitops
                 sleep $((i * 2))
               }
               [ $i -eq 3 ] && { echo "❌ push failed"; exit 1; }
             done
-            echo "✅ gitops updated: ${SVC} → ${TAG}"
+            echo "✅ Canary live — ArgoCD will sync retail-store-${SVC}-canary"
+          fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CANARY APPROVAL GATE
+# Pauses here until a reviewer approves in GitHub → Settings → Environments
+# Configure "production" environment with Required Reviewers before using.
+# ══════════════════════════════════════════════════════════════════════════════
+  canary-approval:
+    name: Approve Canary → Promote to Stable
+    runs-on: ubuntu-latest
+    needs: canary-deploy
+    environment: production
+    steps:
+      - name: Canary is live — awaiting approval
+        run: |
+          echo "Canary deployment is live."
+          echo ""
+          echo "UI (20% traffic):  https://saurabh-devops.in"
+          echo "ArgoCD:            https://argocd.saurabh-devops.in"
+          echo ""
+          echo "Validate the canary, then approve this job to promote to stable."
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STABLE PROMOTE — update values-prod.yaml → ArgoCD rolls out 100%
+# ══════════════════════════════════════════════════════════════════════════════
+  stable-promote:
+    name: Stable Promote — ${{ matrix.service }} (100%)
+    runs-on: ubuntu-latest
+    needs: [detect-changes, canary-approval]
+    if: needs.detect-changes.outputs.has-changes == 'true'
+    permissions:
+      contents: write
+    strategy:
+      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set variables
+        run: |
+          SVC="${{ matrix.service }}"
+          TAG="prod-$(echo ${{ github.sha }} | cut -c1-7)"
+          AWS_ACCOUNT="${{ secrets.AWS_ACCOUNT_ID }}"
+          ECR="${AWS_ACCOUNT}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/retail-store-${SVC}"
+          echo "TAG=${TAG}"       >> $GITHUB_ENV
+          echo "ECR_REPO=${ECR}" >> $GITHUB_ENV
+          echo "SVC=${SVC}"      >> $GITHUB_ENV
+
+      - name: Update values-prod.yaml on gitops branch
+        run: |
+          STABLE_VALUES="src/${SVC}/chart/values-prod.yaml"
+
+          git config user.email "gitops@github.com"
+          git config user.name "GitOps Bot"
+
+          git fetch origin gitops
+          git checkout gitops
+
+          cp "${STABLE_VALUES}" "${STABLE_VALUES}.bak"
+          awk -v repo="${ECR_REPO}" -v tag="${TAG}" '
+            BEGIN { in_img=0; done_repo=0; done_tag=0 }
+            /^image:/                                           { in_img=1; print; next }
+            in_img && /^[[:space:]]*repository:/ && !done_repo { print "  repository: " repo; done_repo=1; next }
+            in_img && /^[[:space:]]*tag:/        && !done_tag  { print "  tag: \"" tag "\""; done_tag=1; next }
+            /^[a-zA-Z]/ && !/^image:/                          { in_img=0 }
+            { print }
+          ' "${STABLE_VALUES}.bak" > "${STABLE_VALUES}"
+
+          if grep -q "\"${TAG}\"" "${STABLE_VALUES}"; then
+            rm "${STABLE_VALUES}.bak"
+            echo "✅ Stable values updated: ${SVC} → ${TAG}"
+          else
+            mv "${STABLE_VALUES}.bak" "${STABLE_VALUES}"
+            echo "❌ Stable values update failed"; exit 1
+          fi
+
+      - name: Commit & push stable to gitops
+        run: |
+          STABLE_VALUES="src/${SVC}/chart/values-prod.yaml"
+
+          if ! git diff --quiet "${STABLE_VALUES}"; then
+            git add "${STABLE_VALUES}"
+            git commit -m "ci(prod): ${SVC} → ${TAG} [skip ci]"
+
+            for i in {1..3}; do
+              git push origin gitops && break || {
+                git pull --rebase origin gitops
+                sleep $((i * 2))
+              }
+              [ $i -eq 3 ] && { echo "❌ push failed"; exit 1; }
+            done
+            echo "✅ Stable promoted — ArgoCD will sync retail-store-${SVC}"
           fi
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -175,33 +303,37 @@ jobs:
   summary:
     name: Pipeline Summary
     runs-on: ubuntu-latest
-    needs: [detect-changes, docker-build-push]
+    needs: [detect-changes, build-push, canary-deploy, canary-approval, stable-promote]
     if: always()
     steps:
       - name: Write summary
         run: |
           TAG="prod-$(echo ${{ github.sha }} | cut -c1-7)"
 
-          echo "## Production Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "## Production Canary Deployment" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
           echo "| **Branch** | \`main\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Environment** | \`prod\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Tag** | \`${TAG}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Namespace** | \`retail-store-prod\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **URL** | \`https://saurabh-devops.in\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Tag** | \`${TAG}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Commit** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Actor** | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| Build & Push | ${{ needs.docker-build-push.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| GitOps Update | ${{ needs.docker-build-push.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build & Push | ${{ needs.build-push.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Canary Deploy (20%) | ${{ needs.canary-deploy.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Canary Approval | ${{ needs.canary-approval.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Stable Promote (100%) | ${{ needs.stable-promote.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ needs.docker-build-push.result }}" == "success" ]; then
-            echo "✅ **ArgoCD will sync \`retail-store-prod\` automatically**" >> $GITHUB_STEP_SUMMARY
-            echo "> Services: ${{ needs.detect-changes.outputs.changed-services }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.stable-promote.result }}" == "success" ]; then
+            echo "✅ **Full rollout complete — ArgoCD syncing \`retail-store-prod\`**" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.canary-approval.result }}" == "success" ]; then
+            echo "🔄 **Canary approved — stable promote in progress**" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.canary-deploy.result }}" == "success" ]; then
+            echo "⏳ **Canary live at 20% — awaiting approval to promote**" >> $GITHUB_STEP_SUMMARY
           else
-            echo "❌ **Deployment failed — check workflow logs**" >> $GITHUB_STEP_SUMMARY
+            echo "❌ **Pipeline failed — check logs**" >> $GITHUB_STEP_SUMMARY
           fi

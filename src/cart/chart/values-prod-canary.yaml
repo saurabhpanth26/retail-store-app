@@ -1,0 +1,9 @@
+# Canary deployment — 1 replica alongside stable prod pods.
+# Traffic split is proportional: 1 canary / (N stable + 1 canary).
+
+fullnameOverride: "retail-store-cart-canary"
+replicaCount: 1
+
+image:
+  repository: 626072240565.dkr.ecr.us-west-2.amazonaws.com/retail-store-cart
+  tag: "prod-latest"

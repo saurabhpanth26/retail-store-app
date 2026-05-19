@@ -1,0 +1,29 @@
+# Canary deployment — 20% traffic via NGINX canary ingress annotations.
+# Runs alongside the stable prod deployment in the same namespace.
+# CI updates image.tag here first; stable promote happens after approval.
+
+fullnameOverride: "retail-store-ui-canary"
+replicaCount: 1
+
+image:
+  repository: 626072240565.dkr.ecr.us-west-2.amazonaws.com/retail-store-ui
+  tag: "prod-latest"
+
+certManager:
+  createClusterIssuer: false
+
+# Disable the multi-ingress block inherited from values-prod.yaml
+ingresses: []
+
+# Single canary ingress — same host as stable, NGINX splits 20% here
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/canary: "true"
+    nginx.ingress.kubernetes.io/canary-weight: "20"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+  hosts:
+    - saurabh-devops.in
+  tls: []

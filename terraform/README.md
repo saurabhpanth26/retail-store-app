@@ -1,184 +1,324 @@
-# Retail Store Terraform Infrastructure
+# Terraform — Retail Store Infrastructure
 
-This directory contains the Terraform configuration for deploying the retail store application infrastructure on AWS EKS.
+Provisions the complete AWS infrastructure for the retail store application:
+VPC → EKS → NGINX Ingress (NLB + ACM TLS) → ArgoCD → Route53 DNS.
 
-## 📁 File Structure
+---
+
+## File Structure
 
 ```
-terraform-organized/
-├── main.tf                    # Primary infrastructure (VPC, EKS)
-├── variables.tf               # Input variables
-├── outputs.tf                 # Output values
-├── versions.tf                # Provider requirements and configurations
-├── locals.tf                  # Local values and data sources
-├── security.tf                # Security groups and rules
-├── addons.tf                  # EKS add-ons (NGINX, cert-manager)
-├── argocd.tf                  # ArgoCD installation
-└── README.md                  # This file
+terraform/
+├── main.tf          # VPC + EKS cluster (Auto Mode)
+├── addons.tf        # EKS add-ons: NGINX Ingress (NLB, ACM cert attached)
+├── acm.tf           # ACM wildcard cert + Route53 hosted zone + A records
+├── argocd.tf        # ArgoCD Helm install
+├── security.tf      # Security groups
+├── locals.tf        # AZ / subnet / tag locals + data sources
+├── variables.tf     # Input variables
+├── outputs.tf       # Cluster name, ACM ARN, nameservers, endpoints
+├── versions.tf      # Provider versions + S3 backend declaration
+├── backend.hcl      # S3 backend config (bucket, key, region)
+└── README.md
 ```
 
-## 🚀 Quick Start
+---
 
-### 1. Prerequisites
+## Prerequisites
 
-- AWS CLI configured with appropriate credentials
-- Terraform >= 1.0 installed
-- kubectl installed
+| Tool | Minimum version | Install |
+|---|---|---|
+| Terraform | **>= 1.10** | https://developer.hashicorp.com/terraform/install |
+| AWS CLI | >= 2.x | https://aws.amazon.com/cli/ |
+| kubectl | any recent | https://kubernetes.io/docs/tasks/tools/ |
+| helm | >= 3.x | https://helm.sh/docs/intro/install/ |
 
-### 2. Configuration
+AWS credentials must be configured before running any command:
 
 ```bash
-# Copy the example variables file
-cp terraform.tfvars.example terraform.tfvars
-
-# Edit the variables file with your preferred settings
-vim terraform.tfvars
+aws configure
+# or
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_REGION=us-west-2
 ```
 
-**Note**: The cluster name will automatically have a random 4-character suffix added (e.g., `retail-store-a1b2`) to prevent resource conflicts and ensure uniqueness.
+---
 
-### 3. Deploy Infrastructure
+## Step 0 — Bootstrap the S3 Backend (Run Once)
 
-You can deploy in two phases for better control:
+Terraform stores state remotely in S3.  
+The bucket and lock file (native Terraform >= 1.10, no DynamoDB needed)
+must exist before `terraform init` can connect to the backend.
 
-#### Phase 1: Deploy EKS Cluster Only
 ```bash
-# Initialize Terraform
-terraform init
-
-# Deploy only the EKS cluster and VPC
-terraform apply -target=module.retail_app_eks -target=module.vpc --auto-approve
+# From the repo root
+chmod +x scripts/setup-tf-backend.sh
+./scripts/setup-tf-backend.sh
 ```
 
-#### Phase 2: Deploy Add-ons and ArgoCD
+The script creates:
+
+| Resource | Name | Purpose |
+|---|---|---|
+| S3 Bucket | `retail-store-tfstate-<account-id>-us-west-2` | Remote state storage |
+| Bucket versioning | enabled | Recover from accidental state corruption |
+| Bucket encryption | AES-256 | State file encryption at rest |
+| Public access block | fully blocked | No accidental public exposure |
+
+It also auto-updates `backend.hcl` with the resolved bucket name.
+
+> If you want a different region, run:
+> ```bash
+> AWS_REGION=eu-west-1 ./scripts/setup-tf-backend.sh
+> ```
+
+---
+
+## Step 1 — Init with Remote Backend
+
 ```bash
-# Get the actual cluster name (with suffix)
-terraform output cluster_name
+cd terraform
 
-# Update kubeconfig to access the cluster (use the output from above)
-aws eks update-kubeconfig --region <aws region> --name <cluster-name-with-suffix>
-
-# Deploy the remaining components
-terraform apply --auto-approve
+terraform init -backend-config=backend.hcl
 ```
 
-#### Single Phase Deployment (Alternative)
-```bash
-# Initialize Terraform
-terraform init
+Expected output:
+```
+Successfully configured the backend "s3"!
+Terraform has been successfully initialized!
+```
 
-# Review the plan
+---
+
+## Step 2 — First Apply (EKS + VPC + ACM Certificate)
+
+The first apply creates the cluster and the ACM certificate.  
+The Route53 A records (pointing to the NLB) are created in the **second apply**
+because the NLB hostname is only known after Kubernetes provisions it.
+
+```bash
 terraform plan
 
-# Apply the complete configuration
 terraform apply
 ```
 
-### 4. Configure kubectl
+This provisions:
+- VPC (3 AZs, public + private subnets, NAT Gateway)
+- EKS cluster (Auto Mode, Kubernetes 1.33)
+- NGINX Ingress Controller (NLB, internet-facing, ACM cert attached)
+- ACM wildcard certificate (`*.saurabh-devops.in` + `saurabh-devops.in`)
+- Route53 hosted zone for `saurabh-devops.in`
+- DNS validation CNAME records in Route53 (auto-validates ACM cert)
+- ArgoCD (installed via Helm into `argocd` namespace)
+
+> **Duration:** ~15–20 minutes (EKS cluster creation is the slowest step)
+
+---
+
+## Step 3 — Point Your Domain to Route53
+
+After Step 2 completes, get the Route53 nameservers:
 
 ```bash
-# Update kubeconfig (replace with your region and cluster name)
-aws eks update-kubeconfig --region us-west-2 --name retail-store
+terraform output route53_nameservers
 ```
 
-### 5. Access ArgoCD
+Example output:
+```
+[
+  "ns-123.awsdns-45.com",
+  "ns-678.awsdns-90.net",
+  "ns-111.awsdns-22.co.uk",
+  "ns-333.awsdns-55.org"
+]
+```
+
+Go to your domain registrar (GoDaddy / Namecheap / etc.) and replace the
+existing NS records for `saurabh-devops.in` with these 4 nameservers.
+
+> DNS propagation takes 5–30 minutes. ACM certificate validation happens
+> automatically via Route53 once propagation completes.
+
+Check ACM validation status:
+```bash
+terraform output acm_certificate_status
+# Should return: ISSUED
+```
+
+---
+
+## Step 4 — Configure kubectl
 
 ```bash
-# Get ArgoCD admin password
-kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+# Get the full cluster name (has a random 4-char suffix)
+terraform output cluster_name
 
-# Port-forward to ArgoCD server
-kubectl port-forward svc/argocd-server -n argocd 8080:443
+# Update kubeconfig
+aws eks update-kubeconfig \
+  --region us-west-2 \
+  --name $(terraform output -raw cluster_name)
 
-# Open browser to https://localhost:8080
+# Verify
+kubectl get nodes
+```
+
+---
+
+## Step 5 — Second Apply (Route53 A Records)
+
+After the NLB is provisioned by NGINX Ingress (happens during Step 2),
+run a second apply to create the DNS A records:
+
+```bash
+terraform apply
+```
+
+This creates Route53 A records pointing to the NLB for:
+
+| Record | Target |
+|---|---|
+| `saurabh-devops.in` | NLB hostname |
+| `dev.saurabh-devops.in` | NLB hostname |
+| `argocd.saurabh-devops.in` | NLB hostname |
+| `sonarqube.saurabh-devops.in` | NLB hostname |
+
+Verify the NLB is ready:
+```bash
+kubectl get svc -n ingress-nginx ingress-nginx-controller
+# EXTERNAL-IP column should show a hostname (not <pending>)
+```
+
+---
+
+## Step 6 — Deploy ArgoCD Applications
+
+Apply the ArgoCD project and applications to the cluster:
+
+```bash
+# Apply ArgoCD project (permissions)
+kubectl apply -f ../argocd/projects/retail-store-project.yaml
+
+# Apply ArgoCD ingress (argocd.saurabh-devops.in)
+kubectl apply -f ../argocd/install/argocd-ingress.yaml
+
+# Deploy dev applications
+kubectl apply -f ../argocd/applications/dev/
+
+# Deploy prod applications
+kubectl apply -f ../argocd/applications/prod/
+
+# Deploy prod canary applications
+kubectl apply -f ../argocd/applications/prod-canary/
+
+# Deploy SonarQube
+kubectl apply -f ../argocd/applications/sonarqube.yaml
+```
+
+---
+
+## Step 7 — Access ArgoCD
+
+```bash
+# Get the admin password
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath='{.data.password}' | base64 -d && echo
+
+# Open in browser
+open https://argocd.saurabh-devops.in
 # Username: admin
-# Password: (from step 1)
+# Password: (from above)
 ```
 
-## 📋 What Gets Deployed
+---
 
-### Core Infrastructure
-- **VPC** with public and private subnets across 3 AZs
-- **EKS Cluster** with Auto Mode enabled
-- **Security Groups** with appropriate rules
+## Application Endpoints (after full deploy)
 
-### Add-ons
-- **NGINX Ingress Controller** for load balancing
-- **Cert Manager** for SSL certificate management
-- **ArgoCD** for GitOps deployment
+| Application | URL |
+|---|---|
+| Prod store | `https://saurabh-devops.in` |
+| Dev store | `https://dev.saurabh-devops.in` |
+| ArgoCD | `https://argocd.saurabh-devops.in` |
+| SonarQube | `https://sonarqube.saurabh-devops.in` (admin / admin) |
 
-### Applications (via ArgoCD)
-- Retail Store microservices (UI, Catalog, Cart, Orders, Checkout)
+---
 
-## 🔧 Customization
-
-### Variables
-
-
-```hcl
-aws_region                = "us-west-2"
-cluster_name              = "retail-store"        # Will have random suffix added
-environment               = "dev"
-kubernetes_version        = "1.33"
-vpc_cidr                  = "10.0.0.0/16"
-enable_single_nat_gateway = true    # Set to false for production
-enable_monitoring         = false   # Set to true to enable monitoring
-```
-
-### Conflict Prevention
-
-This configuration automatically prevents resource conflicts by:
-- Adding a random 4-character suffix to cluster names
-- Using unique KMS key aliases
-- Ensuring resource names don't collide with previous deployments
-
-### Adding More Add-ons
-
-Edit `addons.tf` to enable additional EKS add-ons:
-
-```hcl
-# Enable AWS Load Balancer Controller
-enable_aws_load_balancer_controller = true
-
-# Enable monitoring stack
-enable_kube_prometheus_stack = true
-```
-
-## 🏗️ Architecture
+## Architecture
 
 ```
-Internet
-    │
-    ▼
-┌─────────────────┐
-│   ALB/NLB       │
-│  (via NGINX)    │
-└─────────────────┘
-    │
-    ▼
-┌─────────────────┐
-│   EKS Cluster   │
-│  (Auto Mode)    │
-│                 │
-│  ┌───────────┐  │
-│  │  Retail   │  │
-│  │   Store   │  │
-│  │   Apps    │  │
-│  └───────────┘  │
-│                 │
-│  ┌───────────┐  │
-│  │  ArgoCD   │  │
-│  └───────────┘  │
-└─────────────────┘
+Internet (HTTPS:443)
+        │
+        ▼
+ AWS NLB  ◄── ACM wildcard cert (*.saurabh-devops.in)
+        │      TLS terminates HERE — no cert-manager needed
+        │      Forwards plain HTTP + X-Forwarded-Proto: https
+        ▼
+ NGINX Ingress Controller
+        │  Routes by Host header
+        ├──► retail-store-prod ns  →  saurabh-devops.in
+        ├──► retail-store-dev ns   →  dev.saurabh-devops.in
+        ├──► argocd ns             →  argocd.saurabh-devops.in
+        └──► sonarqube ns          →  sonarqube.saurabh-devops.in
+
+ Route53 (saurabh-devops.in)
+   A  saurabh-devops.in           → NLB
+   A  dev.saurabh-devops.in       → NLB
+   A  argocd.saurabh-devops.in    → NLB
+   A  sonarqube.saurabh-devops.in → NLB
+   CNAME  _acme-challenge.*       → ACM DNS validation
+
+ EKS Cluster (Auto Mode, us-west-2)
+   VPC: 10.0.0.0/16
+   ├── Public subnets  (10.0.0.0/24, 10.0.1.0/24, 10.0.2.0/24)  ← NLB
+   └── Private subnets (10.0.10.0/24, 10.0.11.0/24, 10.0.12.0/24) ← pods
 ```
 
-## 🧹 Cleanup
+---
 
-To destroy all resources:
+## Variables Reference
+
+| Variable | Default | Description |
+|---|---|---|
+| `aws_region` | `us-west-2` | AWS region |
+| `cluster_name` | `retail-store` | EKS cluster base name (random suffix appended) |
+| `environment` | `dev` | Environment tag |
+| `kubernetes_version` | `1.33` | EKS Kubernetes version |
+| `vpc_cidr` | `10.0.0.0/16` | VPC CIDR block |
+| `domain_name` | `saurabh-devops.in` | Root domain for ACM + Route53 |
+| `enable_single_nat_gateway` | `true` | `false` = one NAT per AZ (higher cost, higher availability) |
+| `enable_monitoring` | `false` | Enable Prometheus + Grafana stack |
+
+Override any variable at plan/apply time:
+```bash
+terraform apply -var="environment=prod" -var="enable_single_nat_gateway=false"
+```
+
+---
+
+## Key Outputs
 
 ```bash
+terraform output cluster_name            # Full cluster name with suffix
+terraform output cluster_endpoint        # EKS API endpoint
+terraform output configure_kubectl       # Ready-to-run kubeconfig command
+terraform output acm_certificate_arn     # ACM cert ARN (used by NLB)
+terraform output acm_certificate_status  # ISSUED / PENDING_VALIDATION
+terraform output route53_nameservers     # NS records to set at your registrar
+terraform output domain_endpoints        # All app URLs
+```
+
+---
+
+## Destroy
+
+```bash
+# Remove all AWS resources
 terraform destroy
 ```
 
-**Note**: This will delete all resources including the EKS cluster and VPC. Make sure to backup any important data first.
-
+> This deletes the EKS cluster, VPC, NLB, ACM certificate, and Route53 zone.
+> The S3 state bucket is NOT deleted by `terraform destroy` — remove it manually
+> if no longer needed:
+> ```bash
+> aws s3 rb s3://retail-store-tfstate-<account-id>-us-west-2 --force
+> ```
