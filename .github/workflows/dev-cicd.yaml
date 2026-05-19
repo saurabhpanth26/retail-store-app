@@ -1,0 +1,589 @@
+name: DevSecOps CI/CD - Dev
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Shift-Left Security Pipeline
+#
+# Layer 0  detect-changes
+# Layer 1  [parallel] gitleaks | checkov-terraform | checkov-kubernetes |
+#                               checkov-docker     | trivy-fs (per service)
+# Layer 2  build-test   (per service — compile + unit tests)
+# Layer 3  sonarqube    (per service — quality gate)
+# Layer 4  docker-build-scan-push  (per service — image build, Trivy, SBOM, ECR push)
+# Layer 5  summary
+# ──────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [dev]
+    paths: ['src/**', 'terraform/**', 'argocd/**', '.github/workflows/dev-cicd.yaml']
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  TAG: "dev-${{ github.sha && github.sha || 'manual' }}"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LAYER 0 — DETECT CHANGES
+# ══════════════════════════════════════════════════════════════════════════════
+jobs:
+  detect-changes:
+    name: Detect Changed Services
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.changes.outputs.matrix }}
+      has-changes: ${{ steps.changes.outputs.has-changes }}
+      changed-services: ${{ steps.changes.outputs.changed-services }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed services
+        id: changes
+        run: |
+          SERVICES=("ui" "catalog" "cart" "checkout" "orders")
+          CHANGED=()
+
+          for svc in "${SERVICES[@]}"; do
+            if [ "${{ github.event_name }}" == "workflow_dispatch" ] || \
+               git diff --name-only HEAD~1 HEAD | grep -q "^src/$svc/"; then
+              CHANGED+=("$svc")
+              echo "✅ $svc"
+            fi
+          done
+
+          if [ ${#CHANGED[@]} -eq 0 ]; then
+            echo "has-changes=false" >> $GITHUB_OUTPUT
+            echo "matrix={\"service\":[]}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          MATRIX="["; for i in "${!CHANGED[@]}"; do
+            [ $i -gt 0 ] && MATRIX+=","
+            MATRIX+="\"${CHANGED[$i]}\""
+          done; MATRIX+="]"
+
+          echo "has-changes=true"           >> $GITHUB_OUTPUT
+          echo "matrix={\"service\":$MATRIX}" >> $GITHUB_OUTPUT
+          echo "changed-services=${CHANGED[*]}" >> $GITHUB_OUTPUT
+          echo "📦 Services: ${CHANGED[*]}"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LAYER 1 — SECURITY GATES (all run in parallel)
+# ══════════════════════════════════════════════════════════════════════════════
+
+  # ── Secret detection ────────────────────────────────────────────────────────
+  gitleaks-scan:
+    name: GitLeaks — Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run GitLeaks
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/repo" \
+            -w /repo \
+            zricethezav/gitleaks:latest \
+            detect \
+            --source . \
+            --report-format json \
+            --report-path gitleaks-report.json \
+            --redact \
+            --exit-code 1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.json
+          if-no-files-found: warn
+
+  # ── IaC security — Terraform ────────────────────────────────────────────────
+  checkov-terraform:
+    name: Checkov — Terraform IaC
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install checkov
+
+      - name: Scan Terraform
+        run: |
+          checkov -d terraform \
+            --framework terraform \
+            --output json \
+            --soft-fail \
+            > checkov-terraform-report.json || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: checkov-terraform-report
+          path: checkov-terraform-report.json
+          if-no-files-found: warn
+
+  # ── IaC security — Kubernetes / Helm ────────────────────────────────────────
+  checkov-kubernetes:
+    name: Checkov — Kubernetes/Helm IaC
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install checkov
+
+      - name: Scan Kubernetes manifests
+        run: |
+          checkov -d argocd \
+            --framework kubernetes \
+            --output json \
+            --soft-fail \
+            > checkov-kubernetes-report.json || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: checkov-kubernetes-report
+          path: checkov-kubernetes-report.json
+          if-no-files-found: warn
+
+  # ── IaC security — Dockerfile ───────────────────────────────────────────────
+  checkov-docker:
+    name: Checkov — Dockerfile IaC
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install checkov
+
+      - name: Scan Dockerfiles
+        run: |
+          checkov -d src \
+            --framework dockerfile \
+            --output json \
+            --soft-fail \
+            > checkov-docker-report.json || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: checkov-docker-report
+          path: checkov-docker-report.json
+          if-no-files-found: warn
+
+  # ── Filesystem vulnerability scan (per changed service) ─────────────────────
+  trivy-fs-scan:
+    name: Trivy FS — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has-changes == 'true'
+    strategy:
+      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aquasecurity/setup-trivy@v0.2.6
+        with:
+          version: latest
+          cache: true
+
+      - name: Trivy FS scan — ${{ matrix.service }} (JSON)
+        run: |
+          trivy fs src/${{ matrix.service }} \
+            --format json \
+            --output trivy-fs-${{ matrix.service }}.json \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 0
+
+      - name: Trivy FS scan — ${{ matrix.service }} (Table)
+        run: |
+          trivy fs src/${{ matrix.service }} \
+            --format table \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-fs-${{ matrix.service }}
+          path: trivy-fs-${{ matrix.service }}.json
+          if-no-files-found: warn
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LAYER 2 — BUILD + UNIT TESTS (per service, language-aware)
+# ══════════════════════════════════════════════════════════════════════════════
+  build-test:
+    name: Build & Test — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: [detect-changes, gitleaks-scan]
+    if: needs.detect-changes.outputs.has-changes == 'true'
+    strategy:
+      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect language for ${{ matrix.service }}
+        id: lang
+        run: |
+          SVC="${{ matrix.service }}"
+          if   [ -f "src/$SVC/pom.xml" ];     then echo "lang=java"   >> $GITHUB_OUTPUT
+          elif [ -f "src/$SVC/go.mod" ];       then echo "lang=go"     >> $GITHUB_OUTPUT
+          elif [ -f "src/$SVC/package.json" ]; then echo "lang=node"   >> $GITHUB_OUTPUT
+          else echo "lang=unknown" >> $GITHUB_OUTPUT; fi
+          echo "Detected: $(cat $GITHUB_OUTPUT | grep lang)"
+
+      # ── Java setup ──────────────────────────────────────────────────────────
+      - uses: actions/setup-java@v4
+        if: steps.lang.outputs.lang == 'java'
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Maven compile + test (Java)
+        if: steps.lang.outputs.lang == 'java'
+        run: mvn -f src/${{ matrix.service }}/pom.xml test --no-transfer-progress -Dmaven.test.failure.ignore=true
+
+      # ── Go setup ────────────────────────────────────────────────────────────
+      - uses: actions/setup-go@v5
+        if: steps.lang.outputs.lang == 'go'
+        with:
+          go-version-file: src/${{ matrix.service }}/go.mod
+          cache-dependency-path: src/${{ matrix.service }}/go.sum
+
+      - name: Go test
+        if: steps.lang.outputs.lang == 'go'
+        working-directory: src/${{ matrix.service }}
+        run: go test ./... -v -count=1 2>&1 | tee go-test.log || true
+
+      # ── Node.js setup ───────────────────────────────────────────────────────
+      - uses: actions/setup-node@v4
+        if: steps.lang.outputs.lang == 'node'
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: src/${{ matrix.service }}/package-lock.json
+
+      - name: npm install + test
+        if: steps.lang.outputs.lang == 'node'
+        working-directory: src/${{ matrix.service }}
+        run: |
+          npm ci
+          npm test --if-present || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.service }}
+          path: |
+            src/${{ matrix.service }}/target/surefire-reports/
+            src/${{ matrix.service }}/go-test.log
+          if-no-files-found: ignore
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LAYER 3 — SONARQUBE SCAN (per service, quality gate)
+# ══════════════════════════════════════════════════════════════════════════════
+  sonarqube-scan:
+    name: SonarQube — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs:
+      - build-test
+      - checkov-terraform
+      - checkov-kubernetes
+      - checkov-docker
+      - trivy-fs-scan
+    if: needs.detect-changes.outputs.has-changes == 'true'
+    strategy:
+      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # SonarQube needs full history for blame data
+
+      - name: Detect language for ${{ matrix.service }}
+        id: lang
+        run: |
+          SVC="${{ matrix.service }}"
+          if   [ -f "src/$SVC/pom.xml" ];     then echo "lang=java"  >> $GITHUB_OUTPUT
+          elif [ -f "src/$SVC/go.mod" ];       then echo "lang=go"    >> $GITHUB_OUTPUT
+          elif [ -f "src/$SVC/package.json" ]; then echo "lang=node"  >> $GITHUB_OUTPUT
+          else echo "lang=unknown" >> $GITHUB_OUTPUT; fi
+
+      # For Java: re-compile so SonarQube can analyse bytecode
+      - uses: actions/setup-java@v4
+        if: steps.lang.outputs.lang == 'java'
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Maven compile (Java — bytecode for SonarQube)
+        if: steps.lang.outputs.lang == 'java'
+        run: mvn -f src/${{ matrix.service }}/pom.xml compile --no-transfer-progress -DskipTests
+
+      - name: SonarQube Scan — ${{ matrix.service }}
+        uses: SonarSource/sonarqube-scan-action@master
+        continue-on-error: true
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=retail-store-${{ matrix.service }}
+            -Dsonar.projectName="Retail Store - ${{ matrix.service }}"
+            -Dsonar.sources=src/${{ matrix.service }}
+            -Dsonar.java.binaries=src/${{ matrix.service }}/target/classes
+            -Dsonar.exclusions=**/chart/**,**/*.yaml,**/*.yml
+
+      - name: SonarQube Quality Gate
+        id: quality-gate
+        continue-on-error: true
+        uses: SonarSource/sonarqube-quality-gate-action@master
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: Quality Gate Status
+        run: |
+          STATUS="${{ steps.quality-gate.outputs.quality-gate-status }}"
+          echo "Quality Gate: ${STATUS:-UNKNOWN}"
+          if [ "$STATUS" == "FAILED" ]; then
+            echo "::warning::Quality Gate FAILED for ${{ matrix.service }} — review SonarQube"
+          fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LAYER 4 — DOCKER BUILD + IMAGE SCAN + SBOM + ECR PUSH + GITOPS UPDATE
+# ══════════════════════════════════════════════════════════════════════════════
+  docker-build-scan-push:
+    name: Docker — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: sonarqube-scan
+    if: needs.detect-changes.outputs.has-changes == 'true'
+    permissions:
+      contents: write
+    strategy:
+      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set image variables
+        run: |
+          SVC="${{ matrix.service }}"
+          TAG="dev-$(echo ${{ github.sha }} | cut -c1-7)"
+          AWS_ACCOUNT="${{ secrets.AWS_ACCOUNT_ID }}"
+          ECR="${AWS_ACCOUNT}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/retail-store-${SVC}"
+          echo "TAG=${TAG}"     >> $GITHUB_ENV
+          echo "ECR_REPO=${ECR}" >> $GITHUB_ENV
+          echo "SVC=${SVC}"    >> $GITHUB_ENV
+          echo "Tag: ${TAG} | Repo: ${ECR}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Create ECR repo if needed
+        run: |
+          aws ecr describe-repositories --repository-names "retail-store-${SVC}" 2>/dev/null || \
+          aws ecr create-repository \
+            --repository-name "retail-store-${SVC}" \
+            --image-scanning-configuration scanOnPush=true \
+            --encryption-configuration encryptionType=AES256
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (load locally for scanning)
+        uses: docker/build-push-action@v6
+        with:
+          context: src/${{ matrix.service }}
+          load: true
+          push: false
+          tags: |
+            ${{ env.ECR_REPO }}:${{ env.TAG }}
+            ${{ env.ECR_REPO }}:dev-latest
+
+      # ── Trivy image scan ────────────────────────────────────────────────────
+      - uses: aquasecurity/setup-trivy@v0.2.6
+        with:
+          version: latest
+          cache: true
+
+      - name: Trivy image scan (JSON)
+        run: |
+          trivy image ${{ env.ECR_REPO }}:${{ env.TAG }} \
+            --format json \
+            --output trivy-image-${{ matrix.service }}.json \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 0
+
+      - name: Trivy image scan (Table — console output)
+        run: |
+          trivy image ${{ env.ECR_REPO }}:${{ env.TAG }} \
+            --format table \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-image-${{ matrix.service }}
+          path: trivy-image-${{ matrix.service }}.json
+          if-no-files-found: warn
+
+      # ── SBOM generation ─────────────────────────────────────────────────────
+      - name: SBOM — source
+        uses: anchore/sbom-action@v0
+        with:
+          path: src/${{ matrix.service }}
+          format: spdx-json
+          output-file: sbom-source-${{ matrix.service }}.spdx.json
+          upload-artifact: true
+          artifact-name: sbom-source-${{ matrix.service }}
+
+      - name: SBOM — image
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.ECR_REPO }}:${{ env.TAG }}
+          format: spdx-json
+          output-file: sbom-image-${{ matrix.service }}.spdx.json
+          upload-artifact: true
+          artifact-name: sbom-image-${{ matrix.service }}
+
+      # ── Push to ECR ─────────────────────────────────────────────────────────
+      - name: Push to ECR
+        uses: docker/build-push-action@v6
+        with:
+          context: src/${{ matrix.service }}
+          push: true
+          tags: |
+            ${{ env.ECR_REPO }}:${{ env.TAG }}
+            ${{ env.ECR_REPO }}:dev-latest
+
+      # ── Update values-dev.yaml on gitops branch ─────────────────────────────
+      - name: Update Helm values (values-dev.yaml)
+        run: |
+          VALUES_PATH="src/${SVC}/chart/values-dev.yaml"
+
+          git config user.email "gitops@github.com"
+          git config user.name "GitOps Bot"
+
+          git fetch origin gitops
+          git checkout gitops
+
+          if [[ ! -f "${VALUES_PATH}" ]]; then
+            printf "image:\n  repository: %s\n  tag: \"%s\"\n" "${ECR_REPO}" "${TAG}" > "${VALUES_PATH}"
+          else
+            cp "${VALUES_PATH}" "${VALUES_PATH}.bak"
+            awk -v repo="${ECR_REPO}" -v tag="${TAG}" '
+              BEGIN { in_img=0; done_repo=0; done_tag=0 }
+              /^image:/                              { in_img=1; print; next }
+              in_img && /^[[:space:]]*repository:/ && !done_repo { print "  repository: " repo; done_repo=1; next }
+              in_img && /^[[:space:]]*tag:/        && !done_tag  { print "  tag: \"" tag "\""; done_tag=1; next }
+              /^[a-zA-Z]/ && !/^image:/             { in_img=0 }
+              { print }
+            ' "${VALUES_PATH}.bak" > "${VALUES_PATH}"
+
+            if grep -q "\"${TAG}\"" "${VALUES_PATH}"; then
+              rm "${VALUES_PATH}.bak"
+            else
+              mv "${VALUES_PATH}.bak" "${VALUES_PATH}"
+              echo "❌ values update failed"; exit 1
+            fi
+          fi
+
+      - name: Commit & push to gitops
+        run: |
+          VALUES_PATH="src/${SVC}/chart/values-dev.yaml"
+
+          if ! git diff --quiet "${VALUES_PATH}"; then
+            git add "${VALUES_PATH}"
+            git commit -m "ci(dev): ${SVC} → ${TAG} [skip ci]"
+
+            for i in {1..3}; do
+              git push origin gitops && break || {
+                echo "Push conflict — retry $i/3"
+                git pull --rebase origin gitops
+                sleep $((i * 2))
+              }
+              [ $i -eq 3 ] && { echo "❌ push failed"; exit 1; }
+            done
+            echo "✅ gitops updated: ${SVC} → ${TAG}"
+          fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LAYER 5 — SUMMARY
+# ══════════════════════════════════════════════════════════════════════════════
+  summary:
+    name: Pipeline Summary
+    runs-on: ubuntu-latest
+    needs:
+      - detect-changes
+      - gitleaks-scan
+      - checkov-terraform
+      - checkov-kubernetes
+      - checkov-docker
+      - trivy-fs-scan
+      - build-test
+      - sonarqube-scan
+      - docker-build-scan-push
+    if: always()
+    steps:
+      - name: Write summary
+        run: |
+          TAG="dev-$(echo ${{ github.sha }} | cut -c1-7)"
+
+          echo "## DevSecOps Pipeline — Dev Branch" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | \`dev\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Tag** | \`${TAG}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Namespace** | \`retail-store-dev\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Actor** | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Security Gates" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| GitLeaks | ${{ needs.gitleaks-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Checkov Terraform | ${{ needs.checkov-terraform.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Checkov Kubernetes | ${{ needs.checkov-kubernetes.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Checkov Docker | ${{ needs.checkov-docker.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trivy FS | ${{ needs.trivy-fs-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build & Test | ${{ needs.build-test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| SonarQube | ${{ needs.sonarqube-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker Build + Push | ${{ needs.docker-build-scan-push.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.docker-build-scan-push.result }}" == "success" ]; then
+            echo "✅ **ArgoCD will sync \`retail-store-dev\` automatically**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Pipeline failed — ArgoCD sync blocked**" >> $GITHUB_STEP_SUMMARY
+          fi

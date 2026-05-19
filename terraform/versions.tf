@@ -3,8 +3,12 @@
 # =============================================================================
 
 terraform {
-  required_version = ">= 1.0"
-  
+  required_version = ">= 1.10"
+
+  # Backend values are supplied via backend.hcl at init time:
+  #   terraform init -backend-config=backend.hcl
+  backend "s3" {}
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"

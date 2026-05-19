@@ -1,8 +1,17 @@
 .DS_Store
+
+# Terraform
 *.tfvars
-.terraform
-*.tfstate*
-*.lock.hcl
+*.tfvars.json
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfstate.*
+terraform.tfstate.d/
+crash.log
+crash.*.log
+
 *.log
 .vscode
 reports
