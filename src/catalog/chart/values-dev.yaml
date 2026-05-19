@@ -1,0 +1,3 @@
+image:
+  repository: 626072240565.dkr.ecr.us-west-2.amazonaws.com/retail-store-catalog
+  tag: "dev-latest"

@@ -1,0 +1,110 @@
+# SonarQube Community Edition
+# Image: sonarqube:26.5.0.122743-community
+# Domain:  sonarqube.saurabh-devops.in
+# TLS handled by ACM on the NLB — no cert-manager needed
+
+image:
+  repository: sonarqube
+  tag: "26.5.0.122743-community"
+  pullPolicy: IfNotPresent
+
+# Kernel tuning — required for Elasticsearch embedded in SonarQube
+# Runs a privileged init container to set vm.max_map_count and fs.file-max
+initSysctl:
+  enabled: true
+  vmMaxMapCount: 524288
+  fsFileMax: 131072
+  nofile: 131072
+  nproc: 8192
+  securityContext:
+    privileged: true
+    runAsUser: 0
+
+initFs:
+  enabled: true
+  securityContext:
+    privileged: true
+    runAsUser: 0
+
+# SonarQube JVM options
+env:
+  - name: SONAR_CE_JAVAOPTS
+    value: "-Xmx512m -Xms128m"
+  - name: SONAR_WEB_JAVAOPTS
+    value: "-Xmx512m -Xms128m"
+
+resources:
+  limits:
+    cpu: "1"
+    memory: 3Gi
+  requests:
+    cpu: 400m
+    memory: 2Gi
+
+# Persistent storage for SonarQube data, extensions and logs
+persistence:
+  enabled: true
+  storageClass: ""   # uses cluster default StorageClass (gp2/gp3 on EKS)
+  accessMode: ReadWriteOnce
+  size: 10Gi
+
+# Ingress — TLS terminated at NLB via ACM wildcard cert
+ingress:
+  enabled: true
+  ingressClassName: nginx
+  hosts:
+    - name: sonarqube.saurabh-devops.in
+      path: /
+      pathType: Prefix
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+  tls: []   # No TLS secret — ACM handles it at the NLB
+
+service:
+  type: ClusterIP
+  port: 9000
+
+# Bundled PostgreSQL for data persistence
+postgresql:
+  enabled: true
+  postgresqlUsername: sonarqube
+  postgresqlPassword: sonarqube
+  postgresqlDatabase: sonarqube
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 10Gi
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+# Prometheus metrics
+prometheusMonitoring:
+  podMonitor:
+    enabled: false
+
+# Disable monorepo mode — single instance
+replicaCount: 1
+
+# Security context for the main container
+securityContext:
+  fsGroup: 1000
+
+containerSecurityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false  # SonarQube writes to its working dir

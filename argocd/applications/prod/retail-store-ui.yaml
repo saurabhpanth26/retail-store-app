@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: retail-store-ui-prod
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: retail-store
+  source:
+    repoURL: https://github.com/LondheShubham153/retail-store-sample-app
+    targetRevision: gitops
+    path: src/ui/chart
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: retail-store-prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

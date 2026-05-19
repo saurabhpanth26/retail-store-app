@@ -1,0 +1,51 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: retail-store
+  namespace: argocd
+spec:
+  description: Retail Store Sample Application
+  
+  sourceRepos:
+    - 'https://github.com/LondheShubham153/retail-store-sample-app'
+    - 'https://SonarSource.github.io/helm-chart-sonarqube'
+
+  destinations:
+    - namespace: retail-store-dev
+      server: https://kubernetes.default.svc
+    - namespace: retail-store-prod
+      server: https://kubernetes.default.svc
+    - namespace: sonarqube
+      server: https://kubernetes.default.svc
+  
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: 'rbac.authorization.k8s.io'
+      kind: ClusterRole
+    - group: 'rbac.authorization.k8s.io'
+      kind: ClusterRoleBinding
+    - group: 'cert-manager.io'
+      kind: ClusterIssuer
+  
+  namespaceResourceWhitelist:
+    - group: ''
+      kind: ConfigMap
+    - group: ''
+      kind: Secret
+    - group: ''
+      kind: Service
+    - group: ''
+      kind: ServiceAccount
+    - group: ''
+      kind: PersistentVolumeClaim
+    - group: 'apps'
+      kind: Deployment
+    - group: 'apps'
+      kind: StatefulSet
+    - group: 'networking.k8s.io'
+      kind: Ingress
+    - group: 'autoscaling'
+      kind: HorizontalPodAutoscaler
+    - group: 'policy'
+      kind: PodDisruptionBudget

@@ -1,0 +1,5 @@
+image:
+  repository: 626072240565.dkr.ecr.us-west-2.amazonaws.com/retail-store-checkout
+  tag: "prod-latest"
+
+replicaCount: 2
