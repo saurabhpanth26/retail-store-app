@@ -8,8 +8,8 @@ metadata:
 spec:
   project: retail-store
   source:
-    repoURL: https://github.com/LondheShubham153/retail-store-sample-app
-    targetRevision: gitops
+    repoURL: REPO_URL
+    targetRevision: REPO_BRANCH_DEV
     path: src/orders/chart
     helm:
       valueFiles:

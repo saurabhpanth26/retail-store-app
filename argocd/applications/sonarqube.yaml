@@ -18,8 +18,8 @@ spec:
           - $values/argocd/sonarqube/values.yaml
 
     # Values file from our git repo
-    - repoURL: https://github.com/LondheShubham153/retail-store-sample-app
-      targetRevision: gitops
+    - repoURL: REPO_URL
+      targetRevision: REPO_BRANCH_PROD
       ref: values
 
   destination:

@@ -80,3 +80,31 @@ variable "domain_name" {
   type        = string
   default     = "saurabh-devops.in"
 }
+
+variable "repo_url" {
+  description = "HTTPS URL of the GitHub repository (e.g. https://github.com/saurabhpanth26/retail-store-app)"
+  type        = string
+}
+
+variable "dev_branch" {
+  description = "Git branch ArgoCD tracks for dev environment deployments"
+  type        = string
+  default     = "dev"
+}
+
+variable "prod_branch" {
+  description = "Git branch ArgoCD tracks for prod and prod-canary deployments"
+  type        = string
+  default     = "main"
+}
+
+variable "github_username" {
+  description = "GitHub username for private repository authentication"
+  type        = string
+}
+
+variable "github_token" {
+  description = "GitHub Personal Access Token (PAT) for private repository authentication"
+  type        = string
+  sensitive   = true
+}

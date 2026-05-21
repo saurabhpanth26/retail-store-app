@@ -121,8 +121,22 @@ Now run a full apply. Terraform will deploy all remaining resources in
 dependency order:
 
 ```bash
-terraform apply
+terraform apply \
+  -var="repo_url=https://github.com/<your-username>/<your-repo>" \
+  -var="github_username=<your-github-username>" \
+  -var="github_token=<your-pat>"
 ```
+
+> Tip: store all values in a `terraform.tfvars` file (already gitignored via
+> `*.tfvars`) so you don't retype them on every apply:
+> ```hcl
+> # terraform/terraform.tfvars
+> repo_url        = "https://github.com/saurabhpanth26/retail-store-app"
+> dev_branch      = "dev"
+> prod_branch     = "main"
+> github_username = "saurabhpanth26"
+> github_token    = "ghp_xxxxxxxxxxxxxxxxxxxx"
+> ```
 
 This provisions:
 - S3 log buckets (dev + prod) with lifecycle policies
@@ -312,6 +326,11 @@ Internet (HTTPS:443)
 | `vpc_cidr` | `10.0.0.0/16` | VPC CIDR block |
 | `domain_name` | `saurabh-devops.in` | Root domain for ACM + Route53 |
 | `enable_single_nat_gateway` | `true` | `false` = one NAT per AZ (higher cost, higher availability) |
+| `repo_url` | *(required)* | HTTPS URL of your GitHub repository |
+| `dev_branch` | `dev` | Branch ArgoCD tracks for dev environment |
+| `prod_branch` | `main` | Branch ArgoCD tracks for prod + prod-canary |
+| `github_username` | *(required)* | GitHub username for private repo authentication |
+| `github_token` | *(required, sensitive)* | GitHub Personal Access Token (PAT) |
 | `enable_monitoring` | `true` | Kept for reference — monitoring always deploys via `monitoring.tf` |
 | `grafana_admin_password` | `admin123` | Grafana admin password (sensitive — override in production) |
 | `dev_log_retention_days` | `60` | Days before dev log objects expire in S3 |
