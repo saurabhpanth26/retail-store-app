@@ -135,7 +135,60 @@ output "domain_endpoints" {
     dev       = "https://dev.${var.domain_name}"
     argocd    = "https://argocd.${var.domain_name}"
     sonarqube = "https://sonarqube.${var.domain_name}"
+    grafana   = "https://grafana.${var.domain_name}"
   }
+}
+
+# =============================================================================
+# REGION
+# =============================================================================
+
+output "aws_region" {
+  description = "AWS region where all resources are deployed"
+  value       = var.aws_region
+}
+
+# =============================================================================
+# S3 LOG BUCKETS
+# =============================================================================
+
+# =============================================================================
+# MONITORING
+# =============================================================================
+
+output "loki_irsa_role_arn" {
+  description = "IAM role ARN used by the Loki service account (IRSA)"
+  value       = aws_iam_role.loki_irsa.arn
+}
+
+output "grafana_get_url" {
+  description = "Command to get the Grafana ALB URL after deploy (wait ~2-3 min)"
+  value       = "kubectl get ingress grafana -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'"
+}
+
+output "grafana_admin_password_note" {
+  description = "Grafana admin credentials"
+  value       = "Username: admin | Password: value of var.grafana_admin_password (default: admin123)"
+}
+
+output "dev_logs_bucket_name" {
+  description = "Name of the S3 bucket for dev logs"
+  value       = aws_s3_bucket.dev_logs.bucket
+}
+
+output "dev_logs_bucket_arn" {
+  description = "ARN of the S3 bucket for dev logs"
+  value       = aws_s3_bucket.dev_logs.arn
+}
+
+output "prod_logs_bucket_name" {
+  description = "Name of the S3 bucket for prod logs"
+  value       = aws_s3_bucket.prod_logs.bucket
+}
+
+output "prod_logs_bucket_arn" {
+  description = "ARN of the S3 bucket for prod logs"
+  value       = aws_s3_bucket.prod_logs.arn
 }
 
 # =============================================================================

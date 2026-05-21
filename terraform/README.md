@@ -9,16 +9,18 @@ VPC → EKS → NGINX Ingress (NLB + ACM TLS) → ArgoCD → Route53 DNS.
 
 ```
 terraform/
-├── main.tf          # VPC + EKS cluster (Auto Mode)
-├── addons.tf        # EKS add-ons: NGINX Ingress (NLB, ACM cert attached)
-├── acm.tf           # ACM wildcard cert + Route53 hosted zone + A records
-├── argocd.tf        # ArgoCD Helm install
-├── security.tf      # Security groups
-├── locals.tf        # AZ / subnet / tag locals + data sources
-├── variables.tf     # Input variables
-├── outputs.tf       # Cluster name, ACM ARN, nameservers, endpoints
-├── versions.tf      # Provider versions + S3 backend declaration
-├── backend.hcl      # S3 backend config (bucket, key, region)
+├── main.tf              # VPC + EKS cluster (Auto Mode)
+├── addons.tf            # EKS add-ons: NGINX Ingress (NLB, ACM cert attached)
+├── acm.tf               # ACM wildcard cert + Route53 hosted zone + A records
+├── argocd.tf            # ArgoCD Helm install + application deployment
+├── monitoring.tf        # Monitoring stack: Prometheus, Loki, Alloy, Grafana + IRSA
+├── s3-log-buckets.tf    # Dev + Prod S3 log buckets (Loki chunk storage)
+├── security.tf          # Security groups
+├── locals.tf            # AZ / subnet / tag locals + data sources
+├── variables.tf         # Input variables
+├── outputs.tf           # Cluster name, ACM ARN, nameservers, endpoints, bucket names
+├── versions.tf          # Provider versions + S3 backend declaration
+├── backend.hcl          # S3 backend config (bucket, key, region)
 └── README.md
 ```
 
@@ -91,28 +93,48 @@ Terraform has been successfully initialized!
 
 ---
 
-## Step 2 — First Apply (EKS + VPC + ACM Certificate)
+## Step 2a — Bootstrap the Cluster (targeted apply)
 
-The first apply creates the cluster and the ACM certificate.  
-The Route53 A records (pointing to the NLB) are created in the **second apply**
-because the NLB hostname is only known after Kubernetes provisions it.
+The Kubernetes and Helm providers in this project authenticate against the EKS
+cluster endpoint. On a **fresh deploy the cluster does not exist yet**, so a
+plain `terraform apply` would fail when Terraform tries to initialise those
+providers.
+
+Run a targeted apply first to create just the VPC and EKS cluster:
 
 ```bash
-terraform plan
+terraform apply \
+  -target=random_string.suffix \
+  -target=module.vpc \
+  -target=module.retail_app_eks
+```
 
+> **Duration:** ~15 minutes — EKS cluster creation is the slowest step.
+
+Once this completes the cluster is live and the providers can authenticate.
+
+---
+
+## Step 2b — Full Apply (everything else)
+
+Now run a full apply. Terraform will deploy all remaining resources in
+dependency order:
+
+```bash
 terraform apply
 ```
 
 This provisions:
-- VPC (3 AZs, public + private subnets, NAT Gateway)
-- EKS cluster (Auto Mode, Kubernetes 1.33)
-- NGINX Ingress Controller (NLB, internet-facing, ACM cert attached)
+- S3 log buckets (dev + prod) with lifecycle policies
+- IAM IRSA role for Loki S3 access
+- NGINX Ingress Controller (NLB, internet-facing)
 - ACM wildcard certificate (`*.saurabh-devops.in` + `saurabh-devops.in`)
-- Route53 hosted zone for `saurabh-devops.in`
-- DNS validation CNAME records in Route53 (auto-validates ACM cert)
-- ArgoCD (installed via Helm into `argocd` namespace)
+- Route53 hosted zone + DNS validation CNAME records
+- ArgoCD (Helm, `argocd` namespace)
+- Monitoring stack — Prometheus → Loki → Grafana Alloy → Grafana (`monitoring` namespace)
 
-> **Duration:** ~15–20 minutes (EKS cluster creation is the slowest step)
+> **Note:** Route53 A records (root + subdomains → NLB) are skipped on this
+> apply because the NLB hostname is not yet known. They are created in Step 5.
 
 ---
 
@@ -182,6 +204,7 @@ This creates Route53 A records pointing to the NLB for:
 | `dev.saurabh-devops.in` | NLB hostname |
 | `argocd.saurabh-devops.in` | NLB hostname |
 | `sonarqube.saurabh-devops.in` | NLB hostname |
+| `grafana.saurabh-devops.in` | NLB hostname |
 
 Verify the NLB is ready:
 ```bash
@@ -240,6 +263,7 @@ open https://argocd.saurabh-devops.in
 | Dev store | `https://dev.saurabh-devops.in` |
 | ArgoCD | `https://argocd.saurabh-devops.in` |
 | SonarQube | `https://sonarqube.saurabh-devops.in` (admin / admin) |
+| Grafana | `https://grafana.saurabh-devops.in` (admin / `var.grafana_admin_password`) |
 
 ---
 
@@ -258,13 +282,15 @@ Internet (HTTPS:443)
         ├──► retail-store-prod ns  →  saurabh-devops.in
         ├──► retail-store-dev ns   →  dev.saurabh-devops.in
         ├──► argocd ns             →  argocd.saurabh-devops.in
-        └──► sonarqube ns          →  sonarqube.saurabh-devops.in
+        ├──► sonarqube ns          →  sonarqube.saurabh-devops.in
+        └──► monitoring ns         →  grafana.saurabh-devops.in
 
  Route53 (saurabh-devops.in)
    A  saurabh-devops.in           → NLB
    A  dev.saurabh-devops.in       → NLB
    A  argocd.saurabh-devops.in    → NLB
    A  sonarqube.saurabh-devops.in → NLB
+   A  grafana.saurabh-devops.in   → NLB
    CNAME  _acme-challenge.*       → ACM DNS validation
 
  EKS Cluster (Auto Mode, us-west-2)
@@ -286,7 +312,10 @@ Internet (HTTPS:443)
 | `vpc_cidr` | `10.0.0.0/16` | VPC CIDR block |
 | `domain_name` | `saurabh-devops.in` | Root domain for ACM + Route53 |
 | `enable_single_nat_gateway` | `true` | `false` = one NAT per AZ (higher cost, higher availability) |
-| `enable_monitoring` | `false` | Enable Prometheus + Grafana stack |
+| `enable_monitoring` | `true` | Kept for reference — monitoring always deploys via `monitoring.tf` |
+| `grafana_admin_password` | `admin123` | Grafana admin password (sensitive — override in production) |
+| `dev_log_retention_days` | `60` | Days before dev log objects expire in S3 |
+| `prod_log_retention_days` | `365` | Days before prod log objects expire in S3 |
 
 Override any variable at plan/apply time:
 ```bash
@@ -305,6 +334,111 @@ terraform output acm_certificate_arn     # ACM cert ARN (used by NLB)
 terraform output acm_certificate_status  # ISSUED / PENDING_VALIDATION
 terraform output route53_nameservers     # NS records to set at your registrar
 terraform output domain_endpoints        # All app URLs
+terraform output aws_region              # Deployed AWS region
+terraform output dev_logs_bucket_name    # S3 bucket name for dev Loki logs
+terraform output prod_logs_bucket_name   # S3 bucket name for prod Loki logs
+terraform output loki_irsa_role_arn      # IAM role used by Loki service account
+terraform output grafana_get_url         # kubectl command to get the Grafana ALB URL
+```
+
+---
+
+## Step 8 — Deploy the Monitoring Stack
+
+The monitoring stack is fully managed by Terraform (`monitoring.tf`).
+No separate scripts are needed — a single `terraform apply` deploys everything.
+
+### What gets deployed
+
+| Component | Helm chart | Version | Namespace | Purpose |
+|---|---|---|---|---|
+| kube-prometheus-stack | `prometheus-community/kube-prometheus-stack` | 67.4.0 | `monitoring` | Prometheus + Alertmanager + Node Exporter + kube-state-metrics |
+| Loki | `grafana/loki` | 6.29.0 | `monitoring` | Log aggregation backend (SingleBinary, S3 storage) |
+| Grafana Alloy | `grafana/alloy` | 0.12.0 | `monitoring` | DaemonSet — collects logs + metrics from `retail-store-dev` namespace |
+| Grafana | `grafana/grafana` | 8.10.4 | `monitoring` | Dashboards UI — exposed via AWS ALB |
+
+### S3 log buckets (created by Terraform)
+
+| Bucket | Used when | Retention |
+|---|---|---|
+| `retail-store-dev-logs-<suffix>` | `var.environment != "prod"` | 60 d — STANDARD → IA at 30 d |
+| `retail-store-prod-logs-<suffix>` | `var.environment == "prod"` | 365 d — STANDARD → IA at 30 d → Glacier at 90 d |
+
+Loki's service account uses **IRSA** (IAM Role for Service Accounts) so no
+static credentials are ever stored in the cluster.
+
+### Deploy
+
+The monitoring stack is included in the standard apply — it deploys
+automatically alongside the cluster.
+
+```bash
+# Use the default Grafana password or override it:
+terraform apply -var="grafana_admin_password=MyStr0ngPass!"
+
+# For prod (routes Loki to the prod S3 bucket):
+terraform apply -var="environment=prod" -var="grafana_admin_password=MyStr0ngPass!"
+```
+
+Terraform deploys in the correct dependency order:
+`Prometheus → Loki → Grafana Alloy → Grafana`
+
+### Verify
+
+```bash
+# All monitoring pods should be Running
+kubectl get pods -n monitoring
+
+# Get the Grafana ALB URL (ALB provisions in ~2-3 min after apply)
+kubectl get ingress grafana -n monitoring
+
+# Also available as a Terraform output:
+terraform output grafana_get_url
+
+# Confirm Alloy is shipping logs
+kubectl logs -n monitoring -l app.kubernetes.io/name=alloy --tail=20
+
+# Confirm Loki is receiving log labels
+kubectl run lokitest --image=busybox:1.28 --rm -it --restart=Never \
+  -n monitoring -- wget -qO- "http://loki-gateway/loki/api/v1/labels"
+```
+
+### Grafana login
+
+| Field | Value |
+|---|---|
+| URL | ALB hostname from `kubectl get ingress grafana -n monitoring` |
+| Username | `admin` |
+| Password | `var.grafana_admin_password` (default: `admin123` — override in production) |
+
+Pre-built dashboards are provisioned automatically under the **Kubernetes** folder:
+
+- Kubernetes Cluster Overview (ID 315)
+- Kubernetes Pods (ID 13770)
+- Node Exporter Full (ID 1860)
+- Loki Logs (ID 13639)
+- Kubernetes Namespace (ID 15758)
+- Alertmanager (ID 9578)
+
+### Monitoring architecture
+
+```
+retail-store-dev namespace pods
+   │  logs (K8s API)            │  metrics (prometheus.io/scrape: "true")
+   ▼                             ▼
+ Grafana Alloy (DaemonSet)
+   │                             │
+   ▼                             ▼
+ Loki gateway → Loki          Prometheus
+ (chunks → S3 via IRSA)       (metrics → EBS PVC)
+   │                             │
+   └──────────────┬──────────────┘
+                  ▼
+               Grafana  ←── AWS ALB (internet-facing HTTP)
+
+ Terraform-managed S3 buckets
+ ├── retail-store-dev-logs-<suffix>   ← environment != "prod"
+ └── retail-store-prod-logs-<suffix>  ← environment == "prod"
 ```
 
 ---

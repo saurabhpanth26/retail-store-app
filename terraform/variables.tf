@@ -51,9 +51,28 @@ variable "enable_single_nat_gateway" {
 }
 
 variable "enable_monitoring" {
-  description = "Enable monitoring stack (Prometheus, Grafana)"
+  description = "Kept for reference — monitoring is now always deployed via monitoring.tf"
   type        = bool
-  default     = false
+  default     = true
+}
+
+variable "grafana_admin_password" {
+  description = "Grafana admin password — stored in kubernetes secret grafana-admin-secret"
+  type        = string
+  default     = "admin123"
+  sensitive   = true
+}
+
+variable "dev_log_retention_days" {
+  description = "Number of days to retain dev logs in S3 before expiry"
+  type        = number
+  default     = 60
+}
+
+variable "prod_log_retention_days" {
+  description = "Number of days to retain prod logs in S3 before expiry"
+  type        = number
+  default     = 365
 }
 
 variable "domain_name" {

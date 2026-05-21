@@ -144,3 +144,17 @@ resource "aws_route53_record" "sonarqube" {
     evaluate_target_health = true
   }
 }
+
+# grafana subdomain  →  NLB
+resource "aws_route53_record" "grafana" {
+  count   = local.nlb_hostname != null ? 1 : 0
+  zone_id = aws_route53_zone.main.zone_id
+  name    = "grafana.${var.domain_name}"
+  type    = "A"
+
+  alias {
+    name                   = local.nlb_hostname
+    zone_id                = local.nlb_hosted_zone_id
+    evaluate_target_health = true
+  }
+}
