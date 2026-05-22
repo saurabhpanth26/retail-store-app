@@ -5,5 +5,5 @@ fullnameOverride: "retail-store-cart-canary"
 replicaCount: 1
 
 image:
-  repository: 626072240565.dkr.ecr.us-west-2.amazonaws.com/retail-store-cart
+  repository: 879385477302.dkr.ecr.us-west-2.amazonaws.com/retail-store-cart
   tag: "prod-latest"

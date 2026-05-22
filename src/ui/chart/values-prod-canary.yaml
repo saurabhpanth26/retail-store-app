@@ -6,7 +6,7 @@ fullnameOverride: "retail-store-ui-canary"
 replicaCount: 1
 
 image:
-  repository: 626072240565.dkr.ecr.us-west-2.amazonaws.com/retail-store-ui
+  repository: 879385477302.dkr.ecr.us-west-2.amazonaws.com/retail-store-ui
   tag: "prod-latest"
 
 certManager:

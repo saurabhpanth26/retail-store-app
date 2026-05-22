@@ -16,7 +16,7 @@
 # =============================================================================
 set -euo pipefail
 
-AWS_REGION="${AWS_REGION:-us-west-2}"
+AWS_REGION="${AWS_REGION:-ap-south-1}"
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 BUCKET_NAME="retail-store-tfstate-${AWS_ACCOUNT_ID}-${AWS_REGION}"
 
