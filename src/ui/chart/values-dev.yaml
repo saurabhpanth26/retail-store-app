@@ -2,6 +2,13 @@ image:
   repository: 879385477302.dkr.ecr.ap-south-1.amazonaws.com/retail-store-ui
   tag: "dev-f11c156"
 
+app:
+  endpoints:
+    catalog: http://retail-store-catalog-dev:80
+    carts: http://retail-store-cart-dev-carts:80
+    checkout: http://retail-store-checkout-dev:80
+    orders: http://retail-store-orders-dev:80
+
 # Dev environment overrides
 # TLS is terminated by ACM on the NLB — no cert-manager needed here.
 replicaCount: 1
