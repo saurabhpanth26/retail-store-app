@@ -143,71 +143,77 @@ jobs:
             ${{ env.ECR_REPO }}:prod-latest
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CANARY DEPLOY — update values-prod-canary.yaml → ArgoCD syncs canary pods
+# CANARY DEPLOY — update all values-prod-canary.yaml in one commit → no race
+# Single job (no matrix) → one push to main → ArgoCD syncs all canary pods
 # ══════════════════════════════════════════════════════════════════════════════
   canary-deploy:
-    name: Canary Deploy — ${{ matrix.service }}
+    name: Canary Deploy — All Services
     runs-on: ubuntu-latest
     needs: [detect-changes, build-push]
     if: needs.detect-changes.outputs.has-changes == 'true'
     permissions:
       contents: write
-    strategy:
-      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
-      fail-fast: false
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set variables
+      - name: Update canary values for all changed services
         run: |
-          SVC="${{ matrix.service }}"
           TAG="prod-$(echo ${{ github.sha }} | cut -c1-7)"
           AWS_ACCOUNT="${{ secrets.AWS_ACCOUNT_ID }}"
-          ECR="${AWS_ACCOUNT}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/retail-store-${SVC}"
-          echo "TAG=${TAG}"       >> $GITHUB_ENV
-          echo "ECR_REPO=${ECR}" >> $GITHUB_ENV
-          echo "SVC=${SVC}"      >> $GITHUB_ENV
+          SERVICES=(${{ needs.detect-changes.outputs.changed-services }})
 
-      - name: Update values-prod-canary.yaml on main branch
-        run: |
-          CANARY_VALUES="src/${SVC}/chart/values-prod-canary.yaml"
           git config user.email "gitops@github.com"
           git config user.name "GitOps Bot"
           git fetch origin main
           git checkout main
 
-          cp "${CANARY_VALUES}" "${CANARY_VALUES}.bak"
-          awk -v repo="${ECR_REPO}" -v tag="${TAG}" '
-            BEGIN { in_img=0; done_repo=0; done_tag=0 }
-            /^image:/                                           { in_img=1; print; next }
-            in_img && /^[[:space:]]*repository:/ && !done_repo { print "  repository: " repo; done_repo=1; next }
-            in_img && /^[[:space:]]*tag:/        && !done_tag  { print "  tag: \"" tag "\""; done_tag=1; next }
-            /^[a-zA-Z]/ && !/^image:/                          { in_img=0 }
-            { print }
-          ' "${CANARY_VALUES}.bak" > "${CANARY_VALUES}"
+          for SVC in "${SERVICES[@]}"; do
+            ECR="${AWS_ACCOUNT}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/retail-store-${SVC}"
+            CANARY_VALUES="src/${SVC}/chart/values-prod-canary.yaml"
 
-          if grep -q "\"${TAG}\"" "${CANARY_VALUES}"; then
-            rm "${CANARY_VALUES}.bak"
-          else
-            mv "${CANARY_VALUES}.bak" "${CANARY_VALUES}"
-            echo "❌ Canary values update failed"; exit 1
-          fi
+            cp "${CANARY_VALUES}" "${CANARY_VALUES}.bak"
+            awk -v repo="${ECR}" -v tag="${TAG}" '
+              BEGIN { in_img=0; done_repo=0; done_tag=0 }
+              /^image:/                                           { in_img=1; print; next }
+              in_img && /^[[:space:]]*repository:/ && !done_repo { print "  repository: " repo; done_repo=1; next }
+              in_img && /^[[:space:]]*tag:/        && !done_tag  { print "  tag: \"" tag "\""; done_tag=1; next }
+              /^[a-zA-Z]/ && !/^image:/                          { in_img=0 }
+              { print }
+            ' "${CANARY_VALUES}.bak" > "${CANARY_VALUES}"
 
-      - name: Commit & push canary to main
+            if grep -q "\"${TAG}\"" "${CANARY_VALUES}"; then
+              rm "${CANARY_VALUES}.bak"
+              echo "✅ ${SVC} → ${TAG}"
+            else
+              mv "${CANARY_VALUES}.bak" "${CANARY_VALUES}"
+              echo "❌ ${SVC} values update failed"; exit 1
+            fi
+          done
+
+      - name: Commit & push all canary values in one push
         run: |
-          CANARY_VALUES="src/${SVC}/chart/values-prod-canary.yaml"
-          if ! git diff --quiet "${CANARY_VALUES}"; then
-            git add "${CANARY_VALUES}"
-            git commit -m "ci(canary): ${SVC} → ${TAG} [skip ci]"
-            for i in {1..3}; do
+          TAG="prod-$(echo ${{ github.sha }} | cut -c1-7)"
+          SERVICES=(${{ needs.detect-changes.outputs.changed-services }})
+
+          for SVC in "${SERVICES[@]}"; do
+            git add "src/${SVC}/chart/values-prod-canary.yaml"
+          done
+
+          if ! git diff --cached --quiet; then
+            git commit -m "ci(canary): [${SERVICES[*]}] → ${TAG} [skip ci]"
+            for i in {1..5}; do
               git push origin main && break || {
+                echo "Push conflict — retry $i/5"
                 git pull --rebase origin main
-                sleep $((i * 2))
+                sleep $((i * 3))
               }
-              [ $i -eq 3 ] && { echo "❌ push failed"; exit 1; }
+              [ $i -eq 5 ] && { echo "❌ push failed"; exit 1; }
             done
+            echo "✅ canary deployed: [${SERVICES[*]}] → ${TAG} (20% traffic)"
+          else
+            echo "ℹ️ No canary values changed — nothing to push"
           fi
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -395,72 +401,77 @@ jobs:
           echo "✅ Rollback complete — 100% traffic back on stable pods"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STABLE PROMOTE — approved, update values-prod.yaml → ArgoCD rolls out 100%
+# STABLE PROMOTE — approved, update all values-prod.yaml in one commit → 100%
+# Single job (no matrix) → one push to main → ArgoCD rolls out all services
 # ══════════════════════════════════════════════════════════════════════════════
   stable-promote:
-    name: Stable Promote — ${{ matrix.service }} (100%)
+    name: Stable Promote — All Services (100%)
     runs-on: ubuntu-latest
     needs: [detect-changes, canary-approval]
     if: needs.detect-changes.outputs.has-changes == 'true'
     permissions:
       contents: write
-    strategy:
-      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
-      fail-fast: false
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set variables
+      - name: Update stable values for all changed services
         run: |
-          SVC="${{ matrix.service }}"
           TAG="prod-$(echo ${{ github.sha }} | cut -c1-7)"
           AWS_ACCOUNT="${{ secrets.AWS_ACCOUNT_ID }}"
-          ECR="${AWS_ACCOUNT}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/retail-store-${SVC}"
-          echo "TAG=${TAG}"       >> $GITHUB_ENV
-          echo "ECR_REPO=${ECR}" >> $GITHUB_ENV
-          echo "SVC=${SVC}"      >> $GITHUB_ENV
+          SERVICES=(${{ needs.detect-changes.outputs.changed-services }})
 
-      - name: Update values-prod.yaml on main branch
-        run: |
-          STABLE_VALUES="src/${SVC}/chart/values-prod.yaml"
           git config user.email "gitops@github.com"
           git config user.name "GitOps Bot"
           git fetch origin main
           git checkout main
 
-          cp "${STABLE_VALUES}" "${STABLE_VALUES}.bak"
-          awk -v repo="${ECR_REPO}" -v tag="${TAG}" '
-            BEGIN { in_img=0; done_repo=0; done_tag=0 }
-            /^image:/                                           { in_img=1; print; next }
-            in_img && /^[[:space:]]*repository:/ && !done_repo { print "  repository: " repo; done_repo=1; next }
-            in_img && /^[[:space:]]*tag:/        && !done_tag  { print "  tag: \"" tag "\""; done_tag=1; next }
-            /^[a-zA-Z]/ && !/^image:/                          { in_img=0 }
-            { print }
-          ' "${STABLE_VALUES}.bak" > "${STABLE_VALUES}"
+          for SVC in "${SERVICES[@]}"; do
+            ECR="${AWS_ACCOUNT}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/retail-store-${SVC}"
+            STABLE_VALUES="src/${SVC}/chart/values-prod.yaml"
 
-          if grep -q "\"${TAG}\"" "${STABLE_VALUES}"; then
-            rm "${STABLE_VALUES}.bak"
-          else
-            mv "${STABLE_VALUES}.bak" "${STABLE_VALUES}"
-            echo "❌ Stable values update failed"; exit 1
-          fi
+            cp "${STABLE_VALUES}" "${STABLE_VALUES}.bak"
+            awk -v repo="${ECR}" -v tag="${TAG}" '
+              BEGIN { in_img=0; done_repo=0; done_tag=0 }
+              /^image:/                                           { in_img=1; print; next }
+              in_img && /^[[:space:]]*repository:/ && !done_repo { print "  repository: " repo; done_repo=1; next }
+              in_img && /^[[:space:]]*tag:/        && !done_tag  { print "  tag: \"" tag "\""; done_tag=1; next }
+              /^[a-zA-Z]/ && !/^image:/                          { in_img=0 }
+              { print }
+            ' "${STABLE_VALUES}.bak" > "${STABLE_VALUES}"
 
-      - name: Commit & push stable to main
+            if grep -q "\"${TAG}\"" "${STABLE_VALUES}"; then
+              rm "${STABLE_VALUES}.bak"
+              echo "✅ ${SVC} → ${TAG}"
+            else
+              mv "${STABLE_VALUES}.bak" "${STABLE_VALUES}"
+              echo "❌ ${SVC} values update failed"; exit 1
+            fi
+          done
+
+      - name: Commit & push all stable values in one push
         run: |
-          STABLE_VALUES="src/${SVC}/chart/values-prod.yaml"
-          if ! git diff --quiet "${STABLE_VALUES}"; then
-            git add "${STABLE_VALUES}"
-            git commit -m "ci(prod): ${SVC} → ${TAG} [skip ci]"
-            for i in {1..3}; do
+          TAG="prod-$(echo ${{ github.sha }} | cut -c1-7)"
+          SERVICES=(${{ needs.detect-changes.outputs.changed-services }})
+
+          for SVC in "${SERVICES[@]}"; do
+            git add "src/${SVC}/chart/values-prod.yaml"
+          done
+
+          if ! git diff --cached --quiet; then
+            git commit -m "ci(prod): [${SERVICES[*]}] → ${TAG} [skip ci]"
+            for i in {1..5}; do
               git push origin main && break || {
+                echo "Push conflict — retry $i/5"
                 git pull --rebase origin main
-                sleep $((i * 2))
+                sleep $((i * 3))
               }
-              [ $i -eq 3 ] && { echo "❌ push failed"; exit 1; }
+              [ $i -eq 5 ] && { echo "❌ push failed"; exit 1; }
             done
-            echo "✅ Stable promoted — ArgoCD syncing retail-store-${SVC}"
+            echo "✅ Stable promoted: [${SERVICES[*]}] → ${TAG} (100% traffic)"
+          else
+            echo "ℹ️ No stable values changed — nothing to push"
           fi
 
 # ══════════════════════════════════════════════════════════════════════════════
