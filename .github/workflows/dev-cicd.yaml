@@ -581,7 +581,109 @@ jobs:
           fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LAYER 5 — SUMMARY
+# LAYER 5 — DAST (Dynamic Application Security Testing)
+# Runs after ArgoCD syncs the new image to retail-store-dev
+# wait-for-sync → [OWASP ZAP | GoBuster] in parallel
+# ══════════════════════════════════════════════════════════════════════════════
+  wait-for-sync:
+    name: Wait for ArgoCD Sync
+    runs-on: ubuntu-latest
+    needs: [detect-changes, docker-build-scan-push]
+    if: |
+      always() &&
+      needs.detect-changes.outputs.has-changes == 'true' &&
+      needs.docker-build-scan-push.result == 'success'
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          CLUSTER=$(aws eks list-clusters \
+            --query 'clusters[?contains(@, `retail-store`)] | [0]' \
+            --output text)
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name "${CLUSTER}"
+
+      - name: Wait for deployments to be Ready (5 min timeout)
+        run: |
+          SERVICES=(${{ needs.detect-changes.outputs.changed-services }})
+          for SVC in "${SERVICES[@]}"; do
+            echo "⏳ Waiting for retail-store-${SVC}-dev ..."
+            DEPLOYS=$(kubectl get deployment -n retail-store-dev \
+              -l app.kubernetes.io/instance=retail-store-${SVC}-dev \
+              -o jsonpath='{.items[*].metadata.name}')
+            for DEPLOY in $DEPLOYS; do
+              kubectl rollout status deployment/${DEPLOY} \
+                -n retail-store-dev --timeout=300s
+              echo "✅ ${DEPLOY} is Ready"
+            done
+          done
+
+  # ── OWASP ZAP — open vulnerability scan ─────────────────────────────────────
+  dast-owasp-zap:
+    name: OWASP ZAP — Vulnerability Scan
+    runs-on: ubuntu-latest
+    needs: [wait-for-sync]
+    steps:
+      - name: Run OWASP ZAP Baseline Scan
+        run: |
+          mkdir -p zap-reports
+          docker run --rm \
+            -v "$(pwd)/zap-reports:/zap/wrk/:rw" \
+            --user root \
+            zaproxy/zap-stable \
+            zap-baseline.py \
+            -t https://dev.saurabh-devops.in \
+            -r zap-report.html \
+            -J zap-report.json \
+            -x zap-report.xml \
+            -I \
+            --exit-code 0 || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: owasp-zap-report
+          path: zap-reports/
+          if-no-files-found: warn
+
+  # ── GoBuster — endpoint & directory audit ───────────────────────────────────
+  dast-gobuster:
+    name: GoBuster — Endpoint & Directory Audit
+    runs-on: ubuntu-latest
+    needs: [wait-for-sync]
+    steps:
+      - name: Install GoBuster + wordlist
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y gobuster
+          wget -q \
+            https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt \
+            -O common.txt
+
+      - name: Run GoBuster directory scan
+        run: |
+          gobuster dir \
+            -u https://dev.saurabh-devops.in \
+            -w common.txt \
+            -o gobuster-report.txt \
+            --no-error \
+            -q || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gobuster-report
+          path: gobuster-report.txt
+          if-no-files-found: warn
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LAYER 6 — SUMMARY
 # ══════════════════════════════════════════════════════════════════════════════
   summary:
     name: Pipeline Summary
@@ -596,6 +698,9 @@ jobs:
       - build-test
       - sonarqube-scan
       - docker-build-scan-push
+      - wait-for-sync
+      - dast-owasp-zap
+      - dast-gobuster
     if: always()
     steps:
       - name: Write summary
@@ -623,9 +728,15 @@ jobs:
           echo "| Build & Test | ${{ needs.build-test.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| SonarQube | ${{ needs.sonarqube-scan.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Docker Build + Push | ${{ needs.docker-build-scan-push.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Wait for ArgoCD Sync | ${{ needs.wait-for-sync.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| OWASP ZAP | ${{ needs.dast-owasp-zap.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| GoBuster | ${{ needs.dast-gobuster.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ needs.docker-build-scan-push.result }}" == "success" ]; then
-            echo "✅ **ArgoCD will sync \`retail-store-dev\` automatically**" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.dast-owasp-zap.result }}" == "success" ] && \
+             [ "${{ needs.dast-gobuster.result }}" == "success" ]; then
+            echo "✅ **DAST complete — ZAP and GoBuster reports available in Artifacts**" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.docker-build-scan-push.result }}" == "success" ]; then
+            echo "✅ **ArgoCD synced \`retail-store-dev\` — DAST reports in Artifacts**" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ **Pipeline failed — ArgoCD sync blocked**" >> $GITHUB_STEP_SUMMARY
           fi
