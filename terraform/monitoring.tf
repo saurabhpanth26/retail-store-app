@@ -158,7 +158,7 @@ resource "helm_release" "loki" {
     value = aws_iam_role.loki_irsa.arn
   }
 
-  depends_on = [helm_release.prometheus, aws_iam_role_policy_attachment.loki_s3]
+  depends_on = [helm_release.prometheus, aws_iam_role_policy_attachment.loki_s3, kubernetes_storage_class.ebs_sc]
 }
 
 # =============================================================================

@@ -4,9 +4,7 @@ metadata:
   name: argocd-server-ingress
   namespace: argocd
   annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
-    # TLS terminated at NLB by ACM cert — NGINX receives plain HTTP
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
     nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
 spec:
   ingressClassName: nginx
@@ -20,5 +18,5 @@ spec:
               service:
                 name: argocd-server
                 port:
-                  number: 443
+                  number: 80
   # No tls block needed — TLS is terminated at the NLB using the ACM wildcard cert

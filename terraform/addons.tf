@@ -60,6 +60,12 @@ module "eks_addons" {
       {
         name  = "controller.resources.limits.memory"
         value = "256Mi"
+      },
+      # NLB terminates TLS at port 443 and forwards plain HTTP.
+      # Without this, plain HTTP lands on NGINX's HTTPS listener → 400 error.
+      {
+        name  = "controller.service.targetPorts.https"
+        value = "http"
       }
     ]
 
@@ -124,6 +130,30 @@ module "eks_addons" {
   #   most_recent = true
   #   namespace   = "kube-system"
   # }
+
+  depends_on = [module.retail_app_eks]
+}
+
+# =============================================================================
+# EBS CSI STORAGE CLASS
+# EKS Auto Mode ships ebs.csi.eks.amazonaws.com (not the standard ebs.csi.aws.com).
+# This StorageClass must exist before any workload that requests persistent
+# EBS volumes (Loki, SonarQube, etc.) — hence the explicit depends_on in
+# monitoring.tf and any other Helm releases that use it.
+# =============================================================================
+
+resource "kubernetes_storage_class" "ebs_sc" {
+  metadata {
+    name = "ebs-sc"
+  }
+
+  storage_provisioner    = "ebs.csi.eks.amazonaws.com"
+  volume_binding_mode    = "WaitForFirstConsumer"
+  allow_volume_expansion = true
+
+  parameters = {
+    type = "gp3"
+  }
 
   depends_on = [module.retail_app_eks]
 }

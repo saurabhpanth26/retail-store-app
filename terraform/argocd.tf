@@ -117,6 +117,11 @@ resource "null_resource" "argocd_apps" {
       PROD_BRANCH="${var.prod_branch}"
       BASE="${path.module}/../argocd"
 
+      echo "Updating kubeconfig for EKS cluster..."
+      aws eks update-kubeconfig \
+        --name "${local.cluster_name}" \
+        --region "${var.aws_region}"
+
       echo "Applying ArgoCD ingress..."
       kubectl apply -f "$BASE/install/argocd-ingress.yaml"
 

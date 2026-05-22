@@ -52,6 +52,7 @@ ingress:
 
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
 
   hosts:
     - grafana.saurabh-devops.in

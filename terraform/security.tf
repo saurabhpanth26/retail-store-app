@@ -1,4 +1,86 @@
 # =============================================================================
+# GITHUB ACTIONS OIDC — KEYLESS AUTH FOR CI/CD
+# =============================================================================
+
+resource "aws_iam_openid_connect_provider" "github_actions" {
+  url             = "https://token.actions.githubusercontent.com"
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
+  tags            = local.common_tags
+}
+
+data "aws_iam_policy_document" "github_actions_trust" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github_actions.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    # Lock to your repo — dev and main branches only
+    condition {
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = [
+        "repo:saurabhpanth26/retail-store-app:ref:refs/heads/dev",
+        "repo:saurabhpanth26/retail-store-app:ref:refs/heads/main"
+      ]
+    }
+  }
+}
+
+resource "aws_iam_role" "github_actions" {
+  name               = "github-actions-ci-${local.cluster_name}"
+  assume_role_policy = data.aws_iam_policy_document.github_actions_trust.json
+  tags               = local.common_tags
+}
+
+resource "aws_iam_role_policy" "github_actions_ecr" {
+  name = "ecr-push"
+  role = aws_iam_role.github_actions.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ECRAuth"
+        Effect = "Allow"
+        Action = ["ecr:GetAuthorizationToken"]
+        Resource = "*"
+      },
+      {
+        Sid    = "ECRPush"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:CompleteLayerUpload",
+          "ecr:CreateRepository",
+          "ecr:DescribeRepositories",
+          "ecr:InitiateLayerUpload",
+          "ecr:PutImage",
+          "ecr:UploadLayerPart",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage"
+        ]
+        Resource = "arn:aws:ecr:${var.aws_region}:${data.aws_caller_identity.current.account_id}:repository/retail-store-*"
+      }
+    ]
+  })
+}
+
+output "github_actions_role_arn" {
+  description = "ARN to set as AWS_ROLE_ARN in GitHub Actions secrets"
+  value       = aws_iam_role.github_actions.arn
+}
+
+# =============================================================================
 # SECURITY GROUPS AND RULES
 # =============================================================================
 

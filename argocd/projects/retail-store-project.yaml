@@ -9,6 +9,7 @@ spec:
   sourceRepos:
     - 'REPO_URL'
     - 'https://SonarSource.github.io/helm-chart-sonarqube'
+    - 'https://charts.bitnami.com/bitnami'
 
   destinations:
     - namespace: retail-store-dev
@@ -49,3 +50,7 @@ spec:
       kind: HorizontalPodAutoscaler
     - group: 'policy'
       kind: PodDisruptionBudget
+    - group: 'rbac.authorization.k8s.io'
+      kind: Role
+    - group: 'rbac.authorization.k8s.io'
+      kind: RoleBinding

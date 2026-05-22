@@ -115,5 +115,5 @@ variable "github_token" {
 variable "nlb_hostname" {
   description = "NLB hostname from ingress-nginx (leave empty on first apply; populate after NLB is provisioned)"
   type        = string
-  default     = ""
+  default     = "k8s-ingressn-ingressn-d2370cbbae-f866a412c519fb94.elb.ap-south-1.amazonaws.com"
 }

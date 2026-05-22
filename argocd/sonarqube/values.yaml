@@ -44,7 +44,7 @@ resources:
 # Persistent storage for SonarQube data, extensions and logs
 persistence:
   enabled: true
-  storageClass: ""   # uses cluster default StorageClass (gp2/gp3 on EKS)
+  storageClass: "ebs-sc"
   accessMode: ReadWriteOnce
   size: 10Gi
 
@@ -57,8 +57,7 @@ ingress:
       path: /
       pathType: Prefix
   annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
     nginx.ingress.kubernetes.io/proxy-body-size: "64m"
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
