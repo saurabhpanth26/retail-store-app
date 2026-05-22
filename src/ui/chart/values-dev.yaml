@@ -1,6 +1,6 @@
 image:
   repository: 879385477302.dkr.ecr.ap-south-1.amazonaws.com/retail-store-ui
-  tag: "dev-c055d87"
+  tag: "dev-latest"
 
 # Dev environment overrides
 # TLS is terminated by ACM on the NLB — no cert-manager needed here.
@@ -14,16 +14,16 @@ ingresses:
     className: "nginx"
     hosts: []
     annotations:
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/ssl-redirect: "false"
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
       nginx.ingress.kubernetes.io/proxy-body-size: "8m"
   - name: domain
     className: "nginx"
     hosts:
       - dev.saurabh-devops.in
     annotations:
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/ssl-redirect: "false"
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
       nginx.ingress.kubernetes.io/proxy-body-size: "8m"
       nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
       nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
