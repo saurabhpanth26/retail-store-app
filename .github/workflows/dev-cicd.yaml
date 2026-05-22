@@ -13,7 +13,7 @@ name: DevSecOps CI/CD - Dev (Rolling Update)
 # Layer 3  sonarqube    (per service — quality gate)
 # Layer 4  docker-build-scan-push  (per service — image build, Trivy, SBOM, ECR push)
 #            └── ArgoCD detects values-dev.yaml change → Rolling Update begins
-# Layer 5  summary
+# Layer 5  summary just change
 # ──────────────────────────────────────────────────────────────────────────────
 
 on:
