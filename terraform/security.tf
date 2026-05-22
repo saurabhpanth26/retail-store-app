@@ -108,27 +108,13 @@ resource "aws_eks_access_entry" "github_actions" {
   tags          = local.common_tags
 }
 
-resource "aws_eks_access_policy_association" "github_actions_dev" {
+resource "aws_eks_access_policy_association" "github_actions_admin" {
   cluster_name  = module.retail_app_eks.cluster_name
   principal_arn = aws_iam_role.github_actions.arn
-  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
 
   access_scope {
-    type       = "namespace"
-    namespaces = ["retail-store-dev"]
-  }
-
-  depends_on = [aws_eks_access_entry.github_actions]
-}
-
-resource "aws_eks_access_policy_association" "github_actions_prod" {
-  cluster_name  = module.retail_app_eks.cluster_name
-  principal_arn = aws_iam_role.github_actions.arn
-  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
-
-  access_scope {
-    type       = "namespace"
-    namespaces = ["retail-store-prod"]
+    type = "cluster"
   }
 
   depends_on = [aws_eks_access_entry.github_actions]
