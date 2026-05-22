@@ -98,6 +98,42 @@ resource "aws_iam_role_policy" "github_actions_eks" {
   })
 }
 
+# Grant the GitHub Actions IAM role kubectl access inside the cluster.
+# Access Entry (EKS API mode) is the modern replacement for aws-auth ConfigMap.
+# Edit policy on dev/prod namespaces covers: rollout status, scale (canary rollback).
+resource "aws_eks_access_entry" "github_actions" {
+  cluster_name  = module.retail_app_eks.cluster_name
+  principal_arn = aws_iam_role.github_actions.arn
+  type          = "STANDARD"
+  tags          = local.common_tags
+}
+
+resource "aws_eks_access_policy_association" "github_actions_dev" {
+  cluster_name  = module.retail_app_eks.cluster_name
+  principal_arn = aws_iam_role.github_actions.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
+
+  access_scope {
+    type       = "namespace"
+    namespaces = ["retail-store-dev"]
+  }
+
+  depends_on = [aws_eks_access_entry.github_actions]
+}
+
+resource "aws_eks_access_policy_association" "github_actions_prod" {
+  cluster_name  = module.retail_app_eks.cluster_name
+  principal_arn = aws_iam_role.github_actions.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
+
+  access_scope {
+    type       = "namespace"
+    namespaces = ["retail-store-prod"]
+  }
+
+  depends_on = [aws_eks_access_entry.github_actions]
+}
+
 output "github_actions_role_arn" {
   description = "ARN to set as AWS_ROLE_ARN in GitHub Actions secrets"
   value       = aws_iam_role.github_actions.arn
