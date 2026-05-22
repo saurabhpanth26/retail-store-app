@@ -75,6 +75,29 @@ resource "aws_iam_role_policy" "github_actions_ecr" {
   })
 }
 
+resource "aws_iam_role_policy" "github_actions_eks" {
+  name = "eks-kubeconfig"
+  role = aws_iam_role.github_actions.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "EKSList"
+        Effect = "Allow"
+        Action = ["eks:ListClusters"]
+        Resource = "*"
+      },
+      {
+        Sid    = "EKSDescribe"
+        Effect = "Allow"
+        Action = ["eks:DescribeCluster"]
+        Resource = "arn:aws:eks:${var.aws_region}:${data.aws_caller_identity.current.account_id}:cluster/retail-store-*"
+      }
+    ]
+  })
+}
+
 output "github_actions_role_arn" {
   description = "ARN to set as AWS_ROLE_ARN in GitHub Actions secrets"
   value       = aws_iam_role.github_actions.arn
