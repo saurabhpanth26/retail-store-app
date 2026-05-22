@@ -48,8 +48,15 @@ jobs:
           SERVICES=("ui" "catalog" "cart" "checkout" "orders")
           CHANGED=()
 
+          # If the workflow file itself changed (e.g. CI/CD testing), treat all services as changed
+          WORKFLOW_CHANGED=false
+          if git diff --name-only HEAD~1 HEAD | grep -q "^\.github/workflows/dev-cicd\.yaml$"; then
+            WORKFLOW_CHANGED=true
+          fi
+
           for svc in "${SERVICES[@]}"; do
             if [ "${{ github.event_name }}" == "workflow_dispatch" ] || \
+               [ "$WORKFLOW_CHANGED" == "true" ] || \
                git diff --name-only HEAD~1 HEAD | grep -q "^src/$svc/"; then
               CHANGED+=("$svc")
               echo "✅ $svc"
