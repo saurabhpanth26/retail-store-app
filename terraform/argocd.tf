@@ -109,6 +109,7 @@ resource "null_resource" "argocd_apps" {
   depends_on = [kubernetes_secret.argocd_repo]
 
   provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
     command = <<-EOT
       set -e
       REPO_URL="${var.repo_url}"

@@ -56,20 +56,8 @@ resource "aws_acm_certificate_validation" "wildcard" {
 # Run `terraform apply` a second time after the NLB is provisioned.
 # =============================================================================
 
-data "kubernetes_service" "ingress_nginx" {
-  metadata {
-    name      = "ingress-nginx-controller"
-    namespace = "ingress-nginx"
-  }
-
-  depends_on = [module.eks_addons]
-}
-
 locals {
-  nlb_hostname = try(
-    data.kubernetes_service.ingress_nginx.status[0].load_balancer[0].ingress[0].hostname,
-    null
-  )
+  nlb_hostname = var.nlb_hostname != "" ? var.nlb_hostname : null
 }
 
 # NLB hosted zone ID per region (required for Route53 alias records)

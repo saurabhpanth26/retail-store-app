@@ -84,6 +84,7 @@ variable "domain_name" {
 variable "repo_url" {
   description = "HTTPS URL of the GitHub repository (e.g. https://github.com/saurabhpanth26/retail-store-app)"
   type        = string
+  default     = "https://github.com/saurabhpanth26/retail-store-app.git"
 }
 
 variable "dev_branch" {
@@ -101,10 +102,18 @@ variable "prod_branch" {
 variable "github_username" {
   description = "GitHub username for private repository authentication"
   type        = string
+  default     = "saurabhpanth26"
 }
 
 variable "github_token" {
   description = "GitHub Personal Access Token (PAT) for private repository authentication"
   type        = string
   sensitive   = true
+  default     = "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"
+}
+
+variable "nlb_hostname" {
+  description = "NLB hostname from ingress-nginx (leave empty on first apply; populate after NLB is provisioned)"
+  type        = string
+  default     = ""
 }
