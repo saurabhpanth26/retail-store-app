@@ -63,9 +63,15 @@ jobs:
           fi
 
           for svc in "${SERVICES[@]}"; do
+            # Exclude pipeline-managed values files — changes to those files are
+            # committed by the pipeline itself and must not trigger a rebuild.
+            SVC_CHANGED=$(git diff --name-only HEAD~1 HEAD \
+              | grep "^src/$svc/" \
+              | grep -vE "chart/values-prod(-canary)?\.yaml$" \
+              | grep -c .)
             if [ "${{ github.event_name }}" == "workflow_dispatch" ] || \
                [ "$WORKFLOW_CHANGED" == "true" ] || \
-               git diff --name-only HEAD~1 HEAD | grep -q "^src/$svc/"; then
+               [ "$SVC_CHANGED" -gt 0 ]; then
               CHANGED+=("$svc")
               echo "✅ $svc"
             fi
