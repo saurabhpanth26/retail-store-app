@@ -253,7 +253,25 @@ jobs:
 
           for SVC in "${SERVICES[@]}"; do
             DEPLOY="retail-store-${SVC}-canary"
-            echo "⏳ Waiting for ${DEPLOY} ..."
+            echo "⏳ Waiting for ArgoCD to create ${DEPLOY} ..."
+
+            # ArgoCD syncs asynchronously — wait up to 3 min for the Deployment to exist
+            CREATED=false
+            for attempt in $(seq 1 18); do
+              if kubectl get deployment/${DEPLOY} -n retail-store-prod &>/dev/null; then
+                CREATED=true
+                echo "✅ ${DEPLOY} created by ArgoCD (${attempt}x10s)"
+                break
+              fi
+              echo "  not found yet — retrying in 10s ($((attempt * 10))s elapsed)"
+              sleep 10
+            done
+
+            if [ "$CREATED" == "false" ]; then
+              echo "❌ ${DEPLOY} was never created by ArgoCD (timed out after 3 min)"
+              FAILED+=("${DEPLOY}")
+              continue
+            fi
 
             if kubectl rollout status deployment/${DEPLOY} \
                 -n retail-store-prod \
