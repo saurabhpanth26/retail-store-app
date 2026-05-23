@@ -7,7 +7,7 @@ replicaCount: 1
 
 image:
   repository: 879385477302.dkr.ecr.ap-south-1.amazonaws.com/retail-store-ui
-  tag: "prod-fab383f"
+  tag: "prod-1705de6"
 
 certManager:
   createClusterIssuer: false
