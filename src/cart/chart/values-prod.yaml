@@ -1,5 +1,5 @@
 image:
   repository: 879385477302.dkr.ecr.ap-south-1.amazonaws.com/retail-store-cart
-  tag: "prod-latest"
+  tag: "prod-fab383f"
 
 replicaCount: 2
