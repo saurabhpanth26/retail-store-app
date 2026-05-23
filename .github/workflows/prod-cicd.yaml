@@ -68,7 +68,7 @@ jobs:
             SVC_CHANGED=$(git diff --name-only HEAD~1 HEAD \
               | grep "^src/$svc/" \
               | grep -vE "chart/values-prod(-canary)?\.yaml$" \
-              | grep -c .)
+              | grep -c . || echo 0)
             if [ "${{ github.event_name }}" == "workflow_dispatch" ] || \
                [ "$WORKFLOW_CHANGED" == "true" ] || \
                [ "$SVC_CHANGED" -gt 0 ]; then
