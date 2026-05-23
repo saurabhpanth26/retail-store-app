@@ -3,4 +3,4 @@ replicaCount: 1
 
 image:
   repository: 879385477302.dkr.ecr.ap-south-1.amazonaws.com/retail-store-checkout
-  tag: "prod-5cc2c2f"
+  tag: "prod-636e9de"

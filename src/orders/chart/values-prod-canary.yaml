@@ -2,5 +2,5 @@ fullnameOverride: "retail-store-orders-canary"
 replicaCount: 1
 
 image:
-  repository: 879385477302.dkr.ecr.us-west-2.amazonaws.com/retail-store-orders
-  tag: "prod-latest"
+  repository: 879385477302.dkr.ecr.ap-south-1.amazonaws.com/retail-store-orders
+  tag: "prod-636e9de"
