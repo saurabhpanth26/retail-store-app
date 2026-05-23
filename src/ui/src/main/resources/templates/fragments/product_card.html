@@ -1,49 +1,32 @@
 <div
-  class="bg-white text-sm"
+  class="group bg-white rounded-2xl overflow-hidden border border-gray-100 shadow-sm hover:shadow-md transition-shadow duration-200"
   th:fragment="card (product)"
   xmlns:th="http://www.thymeleaf.org"
 >
-  <a href="#" th:href="@{/catalog/{itemId}(itemId=${product.id})}"
-    ><img
-      src="https://via.placeholder.com/300"
-      alt="Product 1"
-      class="w-fit h-fit object-cover rounded-lg"
-      th:src="@{/assets/img/products/{itemId}.jpg(itemId=${item.id})}"
-  /></a>
-  <div class="py-4 product-card">
-    <h3
-      class="text-gray-800 mb-2 text-base text-black hover:text-primary-500 cursor-pointer product-name"
+  <a th:href="@{/catalog/{itemId}(itemId=${product.id})}" class="block overflow-hidden">
+    <img
+      th:src="@{/assets/img/products/{itemId}.jpg(itemId=${product.id})}"
+      alt="Product image"
+      class="w-full h-52 object-cover group-hover:scale-105 transition-transform duration-300"
+    />
+  </a>
+  <div class="p-4">
+    <a
+      th:href="@{/catalog/{itemId}(itemId=${product.id})}"
+      class="block text-sm font-semibold text-gray-900 hover:text-primary-600 transition-colors duration-150 mb-1 product-name line-clamp-2"
       th:text="${product.name}"
-    >
-      <a href="#" th:href="@{/catalog/{itemId}(itemId=${product.id})}"
-        >Wireless Headphones</a
-      >
-    </h3>
-    <div class="flex items-center space-x-1">
-      <div
-        class="flex items-center mb-2"
-        role="img"
-        aria-label="2 out of 5 stars"
-      >
-        <i class="fas fa-star text-gray-300"></i>
-        <i class="fas fa-star text-gray-300"></i>
-        <i class="fas fa-star text-gray-300"></i>
-        <i class="fas fa-star text-gray-300"></i>
-        <i class="fas fa-star text-gray-300"></i>
-      </div>
-    </div>
-    <p class="text-gray-600 mb-4 product-price">
-      $<th:block th:text="${product.price}">143.00</th:block>
+    >Product Name</a>
+    <p class="text-primary-600 font-bold text-sm mb-4 product-price">
+      $<th:block th:text="${product.price}">0.00</th:block>
     </p>
     <form th:action="@{/cart}" method="POST">
       <input type="hidden" name="productId" th:value="${product.id}" />
       <button
-        class="w-full bg-primary-500 text-white py-2 rounded-lg hover:bg-primary-700 transition duration-300 add-to-cart"
-        href="#"
-        onclick="this.closest('form').submit();return false;"
+        type="submit"
+        class="w-full flex items-center justify-center gap-2 bg-primary-500 text-white text-sm font-medium py-2 rounded-lg hover:bg-primary-600 active:bg-primary-700 transition-colors duration-150 add-to-cart"
       >
-        <i class="fas fa-square-plus"></i>
-        <span th:text="#{button.addtocart}">Add to Cart</span>
+        <i class="fas fa-plus text-xs"></i>
+        <span th:text="#{button.addtocart}">Add to Loadout</span>
       </button>
     </form>
   </div>
