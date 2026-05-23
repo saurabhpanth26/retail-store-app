@@ -2,6 +2,10 @@
 # TLS is terminated by ACM on the NLB — no cert-manager needed here.
 replicaCount: 2
 
+image:
+  repository: 879385477302.dkr.ecr.ap-south-1.amazonaws.com/retail-store-ui
+  tag: "prod-latest"
+
 certManager:
   createClusterIssuer: false
 
