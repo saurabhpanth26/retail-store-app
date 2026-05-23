@@ -1,6 +1,6 @@
 image:
   repository: 879385477302.dkr.ecr.ap-south-1.amazonaws.com/retail-store-ui
-  tag: "dev-79811c8"
+  tag: "dev-eb6ff9a"
 
 app:
   endpoints:
