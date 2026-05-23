@@ -12,6 +12,13 @@ image:
 certManager:
   createClusterIssuer: false
 
+app:
+  endpoints:
+    catalog: http://retail-store-catalog-prod:80
+    carts: http://retail-store-cart-prod-carts:80
+    orders: http://retail-store-orders-prod:80
+    checkout: http://retail-store-checkout-prod:80
+
 # Disable the multi-ingress block inherited from values-prod.yaml
 ingresses: []
 
