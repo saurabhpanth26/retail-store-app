@@ -245,10 +245,28 @@ jobs:
           aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name "${CLUSTER}"
           echo "✅ kubectl configured for cluster: ${CLUSTER}"
 
+      - name: Diagnose ArgoCD canary app state
+        run: |
+          echo "=== All ArgoCD Applications ==="
+          kubectl get applications -n argocd -o wide || echo "❌ Could not list ArgoCD apps"
+
+          echo ""
+          echo "=== Canary Application details ==="
+          SERVICES=(${{ needs.detect-changes.outputs.changed-services }})
+          for SVC in "${SERVICES[@]}"; do
+            APP="retail-store-${SVC}-canary"
+            echo "--- ${APP} ---"
+            kubectl get application/${APP} -n argocd \
+              -o jsonpath='sync={.status.sync.status} health={.status.health.status} message={.status.conditions[*].message}' \
+              2>/dev/null && echo "" || echo "❌ Application ${APP} NOT FOUND in ArgoCD"
+          done
+
+          echo ""
+          echo "=== Deployments in retail-store-prod ==="
+          kubectl get deployments -n retail-store-prod 2>/dev/null || echo "❌ Could not list deployments"
+
       - name: Trigger immediate ArgoCD refresh for canary apps
         run: |
-          # ArgoCD polls git every ~3 min by default. Annotating the Application
-          # CRD forces an immediate refresh so we don't race against the poll window.
           SERVICES=(${{ needs.detect-changes.outputs.changed-services }})
           for SVC in "${SERVICES[@]}"; do
             kubectl annotate application/retail-store-${SVC}-canary \
@@ -256,7 +274,7 @@ jobs:
               argocd.argoproj.io/refresh=normal \
               --overwrite 2>/dev/null \
               && echo "✅ Triggered refresh: retail-store-${SVC}-canary" \
-              || echo "⚠️  Could not annotate retail-store-${SVC}-canary (app may not exist)"
+              || echo "⚠️  Application retail-store-${SVC}-canary NOT FOUND — canary apps may need to be applied via Terraform"
           done
 
       - name: Wait for canary pods to be Ready (5 min timeout)
