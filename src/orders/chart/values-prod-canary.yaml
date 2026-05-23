@@ -3,7 +3,7 @@ replicaCount: 1
 
 image:
   repository: 879385477302.dkr.ecr.ap-south-1.amazonaws.com/retail-store-orders
-  tag: "prod-434ac4d"
+  tag: "prod-0beb39a"
 
 # orders-db and orders-rabbitmq Secrets are owned by retail-store-orders-prod — canary reuses them
 app:

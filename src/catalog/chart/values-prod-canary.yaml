@@ -3,7 +3,7 @@ replicaCount: 1
 
 image:
   repository: 879385477302.dkr.ecr.ap-south-1.amazonaws.com/retail-store-catalog
-  tag: "prod-434ac4d"
+  tag: "prod-0beb39a"
 
 # catalog-db Secret is owned by retail-store-catalog-prod — canary reuses it
 app:
