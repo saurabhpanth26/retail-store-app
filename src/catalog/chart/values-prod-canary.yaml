@@ -4,3 +4,9 @@ replicaCount: 1
 image:
   repository: 879385477302.dkr.ecr.us-west-2.amazonaws.com/retail-store-catalog
   tag: "prod-latest"
+
+# catalog-db Secret is owned by retail-store-catalog-prod — canary reuses it
+app:
+  persistence:
+    secret:
+      create: false
