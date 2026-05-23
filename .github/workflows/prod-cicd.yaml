@@ -245,7 +245,21 @@ jobs:
           aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name "${CLUSTER}"
           echo "✅ kubectl configured for cluster: ${CLUSTER}"
 
-      - name: Wait for canary pods to be Ready (2 min timeout)
+      - name: Trigger immediate ArgoCD refresh for canary apps
+        run: |
+          # ArgoCD polls git every ~3 min by default. Annotating the Application
+          # CRD forces an immediate refresh so we don't race against the poll window.
+          SERVICES=(${{ needs.detect-changes.outputs.changed-services }})
+          for SVC in "${SERVICES[@]}"; do
+            kubectl annotate application/retail-store-${SVC}-canary \
+              -n argocd \
+              argocd.argoproj.io/refresh=normal \
+              --overwrite 2>/dev/null \
+              && echo "✅ Triggered refresh: retail-store-${SVC}-canary" \
+              || echo "⚠️  Could not annotate retail-store-${SVC}-canary (app may not exist)"
+          done
+
+      - name: Wait for canary pods to be Ready (5 min timeout)
         id: pod-check
         run: |
           SERVICES=(${{ needs.detect-changes.outputs.changed-services }})
@@ -255,9 +269,9 @@ jobs:
             DEPLOY="retail-store-${SVC}-canary"
             echo "⏳ Waiting for ArgoCD to create ${DEPLOY} ..."
 
-            # ArgoCD syncs asynchronously — wait up to 3 min for the Deployment to exist
+            # ArgoCD refresh was triggered above; allow up to 5 min for sync + rollout
             CREATED=false
-            for attempt in $(seq 1 18); do
+            for attempt in $(seq 1 30); do
               if kubectl get deployment/${DEPLOY} -n retail-store-prod &>/dev/null; then
                 CREATED=true
                 echo "✅ ${DEPLOY} created by ArgoCD (${attempt}x10s)"
@@ -268,7 +282,7 @@ jobs:
             done
 
             if [ "$CREATED" == "false" ]; then
-              echo "❌ ${DEPLOY} was never created by ArgoCD (timed out after 3 min)"
+              echo "❌ ${DEPLOY} was never created by ArgoCD (timed out after 5 min)"
               FAILED+=("${DEPLOY}")
               continue
             fi
