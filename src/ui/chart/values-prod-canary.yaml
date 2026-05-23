@@ -7,7 +7,7 @@ replicaCount: 1
 
 image:
   repository: 879385477302.dkr.ecr.ap-south-1.amazonaws.com/retail-store-ui
-  tag: "prod-434ac4d"
+  tag: "prod-7352b93"
 
 certManager:
   createClusterIssuer: false
