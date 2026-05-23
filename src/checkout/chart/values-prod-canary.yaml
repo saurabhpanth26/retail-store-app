@@ -2,5 +2,5 @@ fullnameOverride: "retail-store-checkout-canary"
 replicaCount: 1
 
 image:
-  repository: 879385477302.dkr.ecr.us-west-2.amazonaws.com/retail-store-checkout
-  tag: "prod-latest"
+  repository: 879385477302.dkr.ecr.ap-south-1.amazonaws.com/retail-store-checkout
+  tag: "prod-b65eb81"
