@@ -1,0 +1,72 @@
+.ecs-restart:
+  stage: env-maintenance
+  image: ${NODE_IMAGE}
+  tags:
+  - $CI_RUNNER
+  - docker
+  when: manual
+  allow_failure: true
+  needs: []
+  variables:
+    AWS_REGION: us-east-1
+    AWS_DEFAULT_REGION: us-east-1
+    ECS_CLUSTER: "${ECR_NAMESPACE}-ecs-fargate-cluster-${ECS_ENV}"
+  script:
+  - set -eu
+  - aws sts get-caller-identity --query Arn --output text
+  - echo "Restarting service $STACK_NAMES in cluster $ECS_CLUSTER (account $awsAccountID)"
+  - aws ecs update-service --cluster "$ECS_CLUSTER" --service "$STACK_NAMES" --force-new-deployment --query "service.deployments[0].id" --output text
+  - aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$STACK_NAMES"
+  - echo "Restart complete - $STACK_NAMES is stable"
+
+# DEV
+01::restart-dev:
+  extends:
+  - .ecs-restart
+  - .dev-variables
+  variables:
+    ECS_ENV: dev
+  environment:
+    name: dev
+    action: access
+  rules:
+  - if: ($CI_COMMIT_BRANCH =~/master|main|hotfix-*|development-*|feature-*|release-*/)
+
+# QA
+02::restart-test:
+  extends:
+  - .ecs-restart
+  - .test-variables
+  variables:
+    ECS_ENV: tst
+  environment:
+    name: test
+    action: access
+  rules:
+  - if: ($CI_COMMIT_BRANCH =~/master|main|hotfix-*|development-*|feature-*|release-*/)
+
+# UAT (preprod)
+03::restart-preprod:
+  extends:
+  - .ecs-restart
+  - .preprod-variables
+  variables:
+    ECS_ENV: pp
+  environment:
+    name: preprod
+    action: access
+  rules:
+  - if: ($ENABLE_PREPROD_ENV == "true" && $CI_COMMIT_BRANCH =~/master|main/)
+
+# PROD
+04::restart-prod:
+  extends:
+  - .ecs-restart
+  - .prod-variables
+  variables:
+    ECS_ENV: prd
+  environment:
+    name: prod
+    action: access
+  rules:
+  - if: ($CI_COMMIT_BRANCH =~/master|main/)
