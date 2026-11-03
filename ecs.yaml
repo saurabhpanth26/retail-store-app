@@ -11,6 +11,10 @@
     AWS_REGION: us-east-1
     AWS_DEFAULT_REGION: us-east-1
     ECS_CLUSTER: "${ECR_NAMESPACE}-ecs-fargate-cluster-${ECS_ENV}"
+  before_script:
+  - !reference [.enterprise-ci]
+  - aws::cli::configure_profile_role pipelinerole $ASSUME_ROLE_ARN
+  - export AWS_PROFILE=pipelinerole
   script:
   - set -eu
   - aws sts get-caller-identity --query Arn --output text
